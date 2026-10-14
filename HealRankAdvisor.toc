@@ -1,0 +1,9 @@
+## Interface: 16001
+## Title: Heal Rank Advisor
+## Notes: Healing per Second and Healing per Mana for every healing spell rank you can use
+## Author: You
+## Version: 1.0.0
+## SavedVariablesPerCharacter: HealRankAdvisorCharDB
+
+Data.lua
+HealRankAdvisor.lua
