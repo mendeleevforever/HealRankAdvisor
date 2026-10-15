@@ -11,9 +11,9 @@ Copy the `HealRankAdvisor/` folder into your WoW Forever `Interface/AddOns/` dir
 | Command | Effect |
 |---|---|
 | `/hra` or `/healranks` | Toggle the table |
-| `/hra talents` | List talents detected as changing cast time or HoT duration |
+| `/hra talents` | List talents detected as changing cast time, HoT duration, healing, mana cost or crit |
 | `/hra debug` | Print the raw parsed values for every row (useful for bug reports) |
-| `/hra resetobs` | Forget learned HoT durations |
+| `/hra resetobs` | Forget learned HoT durations, mana costs and coefficient measurements |
 | `/hra help` | Show help |
 
 ## The table
@@ -55,6 +55,22 @@ Extra HoT time adds extra ticks, so total HoT healing (and its +healing share) i
 
 New WoW Forever talents worded in the usual "Reduces the cast time of your X spell by N sec" / "Increases the duration of your X spell by N sec" way are picked up automatically. `Data.lua` contains a small fallback table (`ns.TALENT_FALLBACK`) used only if a talent's tooltip can't be read.
 
+**Healing %, mana cost and crit talents.** The addon reads every talent you have points in and understands wording such as:
+
+- "Increases the amount healed by your Renew spell by 15%" / "Increases the damage and healing of your instant cast spells by 5%" (Improved Renew, Twin Disciplines, Spiritual Healing, ...)
+- "Reduces the mana cost of your Smite, Holy Fire, and instant cast spells by 9%" (Mental Agility, Improved Healing, Moonglow, ...)
+- "Increases the critical effect chance of your Holy spells by 5%" (Holy Specialization, Improved Regrowth, ...)
+
+"Instant cast spells" means heals with no cast time (Renew, Holy Nova, ...). "Holy spells" / "Nature spells" means every heal of your class's school. Effects that depend on a condition (Renewed Hope's Weakened Soul bonus, Inner Focus, Illumination's mana refund) are not counted.
+
+Each effect is only applied if the game hasn't already applied it, so nothing is counted twice:
+
+- **Healing %** is already in WoW Forever's tooltips (verified for Improved Renew). Once a spell's coefficient has been measured, the addon checks the tooltip actually contains the talent multiplier and applies it itself if it doesn't.
+- **Mana cost.** The game's cost is assumed to include cost talents. The first time you cast a heal, the addon compares the mana actually spent with the game's cost. If they differ by the talent's %, it applies cost talents itself from then on. Mana shown in green has been confirmed by a cast, yellow means the addon applied the talent.
+- **Crit.** Talents for one spell or for instant spells are always added to your character-sheet crit. For school-wide talents ("your Holy spells"), the addon compares your Holy (or Nature) crit with your other spell schools: if it is already higher by the talent's amount, the talent is on the character sheet already.
+
+`/hra talents` lists every talent effect found and whether mana cost talents are in the game's costs. Hover a row to see which talents affect that spell.
+
 ## Where the numbers come from
 
 - Heal amounts and durations: parsed from each rank's live spell tooltip, so WoW Forever's changed base values are used.
@@ -64,8 +80,9 @@ New WoW Forever talents worded in the usual "Reduces the cast time of your X spe
 ## Known limitations
 
 - Estimated +healing shares use vanilla coefficients until the addon has measured a rank. This only affects the Bonus column and the +Healing-off view, not Avg Heal/HPS/HPM.
-- Crit uses your school crit chance. Spell-specific crit talents (e.g. Improved Regrowth) and mana-on-crit effects (Illumination) aren't modelled.
+- Conditional talent effects (Renewed Hope, Illumination, Litany of Light, Inner Focus) aren't modelled.
 - Tooltip parsing assumes an English client.
+
 
 ## Example Images
 
