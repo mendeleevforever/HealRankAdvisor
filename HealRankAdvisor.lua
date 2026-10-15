@@ -7,7 +7,7 @@ local HRA = {}
 _G.HealRankAdvisor = HRA
 ns.HRA = HRA
 
-local VERSION = "1.7.0"
+local VERSION = "1.8.0"
 local GCD     = 1.5
 local DB
 
@@ -18,7 +18,6 @@ local DEFAULTS = {
     untrained     = true,   -- show ranks available at your level but not trained
     hotByDuration = false,  -- HoT HPS = total / HoT duration instead of / cast time
     samples       = {},     -- [spellID] = tooltip values at low/high +healing, to measure coefficients
-    costObs       = {},     -- [spellID] = { cost = mana actually spent, client = client cost, sig }
     healMode      = {},     -- [spell name] = whether talent healing % is in the tooltip
     sort          = "spell",
     observed      = {},     -- [spellID] = { dur = seconds, sig = talentSignature }
@@ -676,8 +675,6 @@ for _, defs in pairs(ns.SPELLS) do
 end
 
 local autoDefs = {}
-ns.TRACK_IDS = {}       -- every heal rank the table knows about (for mana-cost checks)
-HRA.costPct = {}        -- [spellID] = mana cost reduction % from talents (last refresh)
 
 function HRA:BuildEntries()
     local class = select(2, UnitClass("player"))
@@ -689,7 +686,6 @@ function HRA:BuildEntries()
     local function add(e)
         if seen[e.id] then return end
         seen[e.id] = true
-        ns.TRACK_IDS[e.id] = true
         entries[#entries + 1] = e
     end
 
@@ -952,20 +948,10 @@ function HRA:ComputeEntry(e, mods, sig, bonus, critPct, playerLevel)
     end
 
     -- ---- Mana cost ----
-    -- The client's cost is assumed to include cost talents. Casting the spell once
-    -- verifies it: the mana actually spent is compared with the client's number.
+    -- The game's cost already includes cost talents (verified in game: Lesser Heal
+    -- rank 3 shows 64 mana with Improved Healing 3/3, i.e. 75 - 15%), so it is used as-is.
     local clientCost = ManaCost(e.id)
-    HRA.costPct[e.id] = costPct
-    DB.costObs = DB.costObs or {}
-    local mana, costState = clientCost, (costPct > 0) and "assumed" or "none"
-    local ob = DB.costObs[e.id]
-    if ob and ob.sig == sig and ob.client == clientCost then
-        mana, costState = ob.cost, "observed"
-    elseif costPct > 0 and DB.costMode == "apply" then
-        mana, costState = clientCost * (1 - math.min(costPct, 100) / 100), "applied"
-    elseif costPct > 0 and DB.costMode == "client" then
-        costState = "verified"
-    end
+    local mana = clientCost
 
     row.castNow, row.cast = castNow, cast
     row.channel, row.totem = def.channel, def.totem
@@ -973,7 +959,7 @@ function HRA:ComputeEntry(e, mods, sig, bonus, critPct, playerLevel)
     row.direct, row.hot, row.bD, row.bH = direct, hot, bD, bH
     row.cd, row.ch, row.mult = cd, ch, mult
     row.healPct, row.healSrc, row.healIncluded, row.healVerified, row.extraMult = healPct, healSrc, healIncluded, healVerified, extraMult
-    row.costPct, row.costSrc, row.clientCost, row.costState = costPct, costSrc, clientCost, costState
+    row.costPct, row.costSrc, row.clientCost = costPct, costSrc, clientCost
     row.critTal, row.critSrc = critTal, critSrc
     row.critAdd, row.critClient, row.critTotal = critAdd, critPct, critTotal
     row.bonusShare, row.shareMeasured = share, measured
@@ -1164,11 +1150,8 @@ local function RowOnEnter(self)
         GT:AddLine("  " .. r.healSrc, 0.6, 0.6, 0.6, true)
     end
     if r.costPct > 0 then
-        local state = ({ assumed = "assumed in game's cost (cast once to verify)",
-                         verified = "in game's cost (verified)", observed = "verified by your last cast",
-                         applied = ("applied by addon to game's %d"):format(r.clientCost) })[r.costState] or ""
         GT:AddDoubleLine("Talent mana cost:", ("-%s%%"):format(FmtSec(r.costPct)), 0.8, 0.8, 0.8, 1, 1, 1)
-        GT:AddLine(("  %s  (%s)"):format(state, r.costSrc), 0.6, 0.6, 0.6, true)
+        GT:AddLine(("  already in the game's mana cost  (%s)"):format(r.costSrc), 0.6, 0.6, 0.6, true)
     end
     if r.tf > 1 then
         GT:AddDoubleLine("Targets:", DB.group and ("x%s (group heals on)"):format(FmtSec(r.tf)) or "1 (group heals off)", 0.8, 0.8, 0.8, 1, 1, 1)
@@ -1348,7 +1331,7 @@ local function MakeFrame()
     f.legend:SetPoint("TOPRIGHT", f, "BOTTOMRIGHT", -24, 78)
     f.legend:SetJustifyH("LEFT")
     f.legend:SetTextColor(C.legend[1], C.legend[2], C.legend[3])
-    f.legend:SetText("Cast / HoT / Mana / Crit colour:  |cffe6d6aenormal|r = from game client,  "
+    f.legend:SetText("Cast / HoT / Crit colour:  |cffe6d6aenormal|r = from game client,  "
         .. "|cffffe64dyellow|r = talent applied by addon,  "
         .. "|cff66ff66green|r = confirmed by your own cast.   Bonus: ~ = estimated.   Hover a row for talent details.")
 
@@ -1386,7 +1369,7 @@ local function MakeFrame()
     refresh:SetText("Refresh")
     refresh:SetScript("OnClick", function() Safe(HRA.Refresh, HRA) end)
 
-    -- Cast-learning (HoT durations, mana spent) only listens while the table is open
+    -- HoT-duration learning only listens while the table is open
     f:SetScript("OnShow", function() HRA:SetLearning(true) end)
     f:SetScript("OnHide", function() HRA:SetLearning(false) end)
 
@@ -1589,8 +1572,7 @@ function HRA:Render()
 
             local durCol = (r.durSrc == "observed" and COLOR.green) or (r.durSrc == "talent" and COLOR.yellow) or nil
             set("dur", (r.effDur and not r.channel) and (FmtSec(r.effDur) .. "s") or "-", durCol)
-            local manaCol = (r.costState == "applied" and COLOR.yellow) or (r.costState == "observed" and COLOR.green) or nil
-            set("mana", FmtInt(r.mana), manaCol)
+            set("mana", FmtInt(r.mana))
             -- Crit chance of the direct part (HoTs don't crit). Yellow = includes talents.
             if r.direct > 0 then
                 local critCol = (not DB.crit and COLOR.grey) or (r.critAdd > 0 and COLOR.yellow) or nil
@@ -1661,66 +1643,6 @@ end
 -- HoT DURATION LEARNING
 -- After you cast a HoT, read the real duration off the aura you applied.
 -- ============================================================
--- ============================================================
--- MANA COST VERIFICATION
--- The mana actually spent on a cast is compared with the client's cost. If it
--- matches, the client already includes cost talents; if it matches the client
--- cost minus the talent %, the addon applies the talent itself from then on.
--- Casts that match neither (Inner Focus, Clearcasting, a regen tick landing at
--- the same moment) are ignored.
--- ============================================================
-local manaTrack = { last = nil, lastDrop = nil, pending = nil }
-
-local function ResolveCost(spellID, spent)
-    if not spent or spent <= 0 then return end
-    local client = ManaCost(spellID)
-    if client <= 0 then return end
-    local pct = HRA.costPct[spellID] or 0
-    local tol = math.max(1, client * 0.015)
-    local mode
-    if math.abs(spent - client) <= tol then
-        mode = "client"
-    elseif pct > 0 and math.abs(spent - client * (1 - pct / 100)) <= tol + 1 then
-        mode = "apply"
-    else
-        return
-    end
-    DB.costObs[spellID] = { cost = spent, client = client, sig = TalentSig() }
-    if pct > 0 and DB.costMode ~= mode then
-        DB.costMode = mode
-        print(("|cff00ff96HealRankAdvisor:|r mana cost talents are %s."):format(
-            mode == "client" and "already included in the game's spell costs"
-            or "NOT included in the game's spell costs; the addon now applies them. Click Refresh to update"))
-    end
-end
-
-local function OnManaChanged()
-    local cur = UnitPower("player", 0)
-    if type(cur) ~= "number" or Secret(cur) then manaTrack.last = nil; return end   -- secret in combat: skip
-    local now = GetTime()
-    if manaTrack.last and cur < manaTrack.last then
-        local drop = manaTrack.last - cur
-        if manaTrack.pending and now - manaTrack.pending.t <= 0.35 then
-            ResolveCost(manaTrack.pending.id, drop)
-            manaTrack.pending = nil
-        else
-            manaTrack.lastDrop = { amount = drop, t = now }
-        end
-    end
-    manaTrack.last = cur
-end
-
-local function OnHealCast(spellID)
-    local now = GetTime()
-    local d = manaTrack.lastDrop
-    if d and now - d.t <= 0.35 then
-        ResolveCost(spellID, d.amount)
-        manaTrack.lastDrop = nil
-    else
-        manaTrack.pending = { id = spellID, t = now }
-    end
-end
-
 local function ObserveHot(spellID, castAt)
     local units = { "target", "player", "focus", "mouseover", "party1", "party2", "party3", "party4" }
     local inRaid = IsInRaid and IsInRaid()
@@ -1784,8 +1706,7 @@ local function SlashHandler(msg)
         for sp, m in pairs(mods.heal) do any = true; print(("  %s: healing +%s%%  (%s)"):format(CAT[sp] or sp, FmtSec(m.amount), table.concat(m.sources, ", "))) end
         for sp, m in pairs(mods.cost) do any = true; print(("  %s: mana cost -%s%%  (%s)"):format(CAT[sp] or sp, FmtSec(m.amount), table.concat(m.sources, ", "))) end
         for sp, m in pairs(mods.crit) do any = true; print(("  %s: crit +%s%%  (%s)"):format(CAT[sp] or sp, FmtSec(m.amount), table.concat(m.sources, ", "))) end
-        print(("  mana cost talents in game's costs: %s"):format(
-            DB.costMode == "client" and "yes (verified)" or DB.costMode == "apply" and "no (addon applies them)" or "assumed yes (cast a heal to verify)"))
+        print("  (mana cost talents are already included in the game's spell costs)")
         if not any then print("  none") end
         print("  (* = read from the addon's fallback table instead of the talent tooltip)")
         return
@@ -1804,7 +1725,8 @@ local function SlashHandler(msg)
         return
     elseif msg == "resetobs" then
         wipe(DB.observed)
-        DB.costObs, DB.costMode, DB.healMode, DB.samples = {}, nil, {}, {}
+        DB.healMode, DB.samples = {}, {}
+        DB.costObs, DB.costMode = nil, nil   -- leftovers from older versions
         print("|cff00ff96HealRankAdvisor:|r learned durations, mana costs and measurements cleared.")
         if MainFrame and MainFrame:IsShown() then HRA:Refresh() end
         return
@@ -1829,17 +1751,12 @@ end
 Reg("ADDON_LOADED")
 Reg("PLAYER_LOGIN")
 
--- Cast-learning listeners are registered only while the table window is open.
+-- The HoT-duration listener is registered only while the table window is open.
 function HRA:SetLearning(on)
     if on then
         Reg("UNIT_SPELLCAST_SUCCEEDED", "player")
-        Reg("UNIT_POWER_FREQUENT", "player")
-        local mana = UnitPower("player", 0)
-        manaTrack.last = (type(mana) == "number" and not Secret(mana)) and mana or nil
     else
         ev:UnregisterEvent("UNIT_SPELLCAST_SUCCEEDED")
-        ev:UnregisterEvent("UNIT_POWER_FREQUENT")
-        manaTrack.last, manaTrack.pending, manaTrack.lastDrop = nil, nil, nil
     end
 end
 
@@ -1864,11 +1781,6 @@ local function OnEvent(self, event, ...)
             local castAt = GetTime()
             C_Timer.After(0.3, function() Safe(ObserveHot, spellID, castAt) end)
         end
-        if ns.TRACK_IDS[spellID] then OnHealCast(spellID) end
-
-    elseif event == "UNIT_POWER_FREQUENT" then
-        local unit, ptype = ...
-        if unit == "player" and (ptype == "MANA" or ptype == nil) then OnManaChanged() end
     end
 end
 
