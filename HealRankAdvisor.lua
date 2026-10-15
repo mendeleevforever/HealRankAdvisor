@@ -7,7 +7,7 @@ local HRA = {}
 _G.HealRankAdvisor = HRA
 ns.HRA = HRA
 
-local VERSION = "1.4.0"
+local VERSION = "1.7.0"
 local GCD     = 1.5
 local DB
 
@@ -46,6 +46,44 @@ local function Clean(s)
     s = s:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("[\r\n]+", " ")
     return s
 end
+
+-- WoW Forever (like Midnight) can hand addons "secret" values, e.g. a unit's health
+-- or power in combat. They can't be compared or used in math, so check first.
+local function Secret(v)
+    return issecretvalue ~= nil and issecretvalue(v) or false
+end
+ns.Secret = Secret
+
+-- ============================================================
+-- ERROR CAPTURE
+-- Errors are caught instead of spamming the screen. The first one prints a single
+-- chat line; /hra errors opens a window where every error can be copied.
+-- ============================================================
+local ERRORS = {}
+local errorNotified = false
+
+local function ReportError(err, stack)
+    local msg = tostring(err)
+    for _, e in ipairs(ERRORS) do
+        if e.msg == msg then e.count = e.count + 1; return end
+    end
+    if #ERRORS >= 25 then return end
+    ERRORS[#ERRORS + 1] = { msg = msg, stack = stack or "", count = 1, time = date and date("%H:%M:%S") or "" }
+    if not errorNotified then
+        errorNotified = true
+        print("|cffff4040HealRankAdvisor:|r an error was caught. Type |cffffff00/hra errors|r to view and copy it.")
+    end
+end
+HRA.errors = ERRORS
+
+-- Runs fn(...) and catches any error, so a bug never repeats on screen.
+local function Safe(fn, ...)
+    local n, args = select("#", ...), { ... }
+    local ok, a, b, c = xpcall(function() return fn(unpack(args, 1, n)) end,
+        function(e) ReportError(e, debugstack and debugstack(2) or nil); return e end)
+    if ok then return a, b, c end
+end
+ns.Safe = Safe
 
 -- ============================================================
 -- API WRAPPERS (work with both the classic globals and the C_ namespaces)
@@ -120,14 +158,18 @@ local function ManaCost(id)
 end
 
 local scanTip = CreateFrame("GameTooltip", "HRAScanTooltip", nil, "GameTooltipTemplate")
+scanTip:SetScript("OnUpdate", nil)   -- a scanning tooltip never needs to refresh itself
+scanTip:Hide()
 
 local function TooltipDesc(id)
     scanTip:SetOwner(WorldFrame, "ANCHOR_NONE")
     scanTip:ClearLines()
-    if not pcall(scanTip.SetSpellByID, scanTip, id) then return "" end
+    if not pcall(scanTip.SetSpellByID, scanTip, id) then scanTip:Hide(); return "" end
     local n = scanTip:NumLines()
     local fs = n and n > 0 and _G["HRAScanTooltipTextLeft" .. n]
-    return fs and fs:GetText() or ""
+    local text = fs and fs:GetText() or ""
+    scanTip:Hide()
+    return text
 end
 
 local function SpellDesc(id)
@@ -146,14 +188,19 @@ local function ForEachAura(unit, filter, cb)
     if C_UnitAuras and C_UnitAuras.GetAuraDataByIndex then
         for i = 1, 40 do
             local a = C_UnitAuras.GetAuraDataByIndex(unit, i, filter)
-            if not a then break end
-            if cb(a.spellId, a.duration, a.expirationTime, a.sourceUnit) then return end
+            if type(a) ~= "table" then break end
+            local sid, dur, exp, src = a.spellId, a.duration, a.expirationTime, a.sourceUnit
+            if not (Secret(sid) or Secret(dur) or Secret(exp) or Secret(src)) then
+                if cb(sid, dur, exp, src) then return end
+            end
         end
     elseif UnitAura then
         for i = 1, 40 do
             local name, _, _, _, dur, exp, src, _, _, sid = UnitAura(unit, i, filter)
             if not name then break end
-            if cb(sid, dur, exp, src) then return end
+            if not (Secret(sid) or Secret(dur) or Secret(exp) or Secret(src)) then
+                if cb(sid, dur, exp, src) then return end
+            end
         end
     end
 end
@@ -396,58 +443,223 @@ local function Applicable(tbl, def, isInstant, school, categoriesOnly)
 end
 ns.Applicable = Applicable
 
-local function TalentText(tab, i)
-    scanTip:SetOwner(WorldFrame, "ANCHOR_NONE")
-    scanTip:ClearLines()
-    if not pcall(scanTip.SetTalent, scanTip, tab, i) then return "" end
-    local parts = {}
-    for idx = 2, scanTip:NumLines() do
-        local fs = _G["HRAScanTooltipTextLeft" .. idx]
-        local tx = fs and fs:GetText()
-        if tx then
-            if tx:lower():find("^next rank") then break end
-            parts[#parts + 1] = Clean(tx)
-        end
-    end
-    return table.concat(parts, ". ")
+-- ============================================================
+-- READING TALENTS
+-- WoW Forever has no GetNumTalentTabs / GetTalentInfo. Its talent frame uses the
+-- modern trait system (C_ClassTalents / C_Traits): a config holds trees, trees
+-- hold nodes, and each node has a rank and an entry whose spell is the talent.
+-- The old Classic functions are kept as a fallback for other clients.
+-- Every talent with points becomes { name, rank, maxRank, entryID, spellID, tab, index }.
+-- ============================================================
+local function Call(fn, ...)
+    if type(fn) ~= "function" then return nil end
+    local ok, a, b = pcall(fn, ...)
+    if ok then return a, b end
 end
 
-local function TalentSig()
-    local t = {}
-    pcall(function()
-        for tab = 1, (GetNumTalentTabs() or 0) do
-            for i = 1, (GetNumTalents(tab) or 0) do
-                local _, _, _, _, r = GetTalentInfo(tab, i)
-                t[#t + 1] = r or 0
-            end
-        end
-    end)
-    return table.concat(t)
-end
-
-function HRA:GetTalentMods()
-    local mods = { cast = {}, dur = {}, heal = {}, cost = {}, crit = {} }
-    pcall(function()
-        for tab = 1, (GetNumTalentTabs() or 0) do
-            for i = 1, (GetNumTalents(tab) or 0) do
-                local name, _, _, _, rank = GetTalentInfo(tab, i)
-                if name and rank and rank > 0 then
-                    local src  = ("%s %d"):format(name, rank)
-                    local text = TalentText(tab, i)
-                    local found = text ~= "" and ns.ParseTalentText(text, mods, src)
-                    local fb = ns.TALENT_FALLBACK[name]
-                    if not found and fb then
-                        local mult = fb.perRank and rank or 1
-                        for sp, v in pairs(fb.cast or {}) do AddMod(mods.cast, sp, v * mult, src .. "*") end
-                        for sp, v in pairs(fb.dur  or {}) do AddMod(mods.dur,  sp, v * mult, src .. "*") end
-                        for sp, v in pairs(fb.heal or {}) do AddMod(mods.heal, sp, v * mult, src .. "*") end
-                        for sp, v in pairs(fb.cost or {}) do AddMod(mods.cost, sp, v * mult, src .. "*") end
-                        for sp, v in pairs(fb.crit or {}) do AddMod(mods.crit, sp, v * mult, src .. "*") end
+-- Talents read through the trait system for one config
+local function ReadTraitConfig(configID)
+    local ci = Call(C_Traits.GetConfigInfo, configID)
+    if type(ci) ~= "table" or type(ci.treeIDs) ~= "table" then return nil end
+    local list, points = {}, 0
+    for _, treeID in ipairs(ci.treeIDs) do
+        local nodes = Call(C_Traits.GetTreeNodes, treeID)
+        for _, nodeID in ipairs(type(nodes) == "table" and nodes or {}) do
+            local ni = Call(C_Traits.GetNodeInfo, configID, nodeID)
+            if type(ni) == "table" then
+                local rank = ni.activeRank or ni.currentRank or ni.ranksPurchased or 0
+                if type(rank) == "number" and not Secret(rank) and rank > 0 then
+                    local entryID = (type(ni.activeEntry) == "table" and ni.activeEntry.entryID)
+                        or (type(ni.entryIDs) == "table" and ni.entryIDs[1])
+                    local name, spellID
+                    if entryID then
+                        local ei = Call(C_Traits.GetEntryInfo, configID, entryID)
+                        if type(ei) == "table" and ei.definitionID then
+                            local di = Call(C_Traits.GetDefinitionInfo, ei.definitionID)
+                            if type(di) == "table" then
+                                spellID = di.spellID or di.overriddenSpellID
+                                if type(di.overrideName) == "string" and di.overrideName ~= "" then name = di.overrideName end
+                            end
+                        end
+                    end
+                    if not name and spellID then name = SpellName(spellID) end
+                    if name then
+                        list[#list + 1] = { name = name, rank = rank, maxRank = ni.maxRanks or rank,
+                                            entryID = entryID, spellID = spellID, nodeID = nodeID }
+                        points = points + rank
                     end
                 end
             end
         end
+    end
+    return list, points
+end
+
+local function ReadTalentsTraits()
+    if not (C_Traits and C_Traits.GetConfigInfo and C_Traits.GetTreeNodes and C_Traits.GetNodeInfo) then return nil end
+    local group = Call(C_SpecializationInfo and C_SpecializationInfo.GetActiveSpecGroup)
+        or Call(GetActiveSpecGroup) or 1
+
+    -- Config IDs from every read-only "Get...ConfigID..." function C_ClassTalents offers
+    -- (the active config, and the spec group's config Forever's talent frame uses).
+    local candidates, seen = {}, {}
+    local function add(id, prio)
+        if type(id) == "number" and not Secret(id) and id > 0 and not seen[id] then
+            seen[id] = true
+            candidates[#candidates + 1] = { id = id, prio = prio }
+        end
+    end
+    if C_ClassTalents then
+        for fname, fn in pairs(C_ClassTalents) do
+            if type(fn) == "function" and fname:find("^Get") and fname:find("ConfigID") then
+                local prio = (fname:find("Combat") or fname:find("SpecGroup")) and 1
+                    or (fname:find("Active") and 2) or 3
+                local r = Call(fn, group)
+                if type(r) == "table" then
+                    for _, v in ipairs(r) do add(v, prio) end
+                else
+                    add(r, prio)
+                end
+            end
+        end
+    end
+    table.sort(candidates, function(a, b) if a.prio ~= b.prio then return a.prio < b.prio end return a.id < b.id end)
+
+    local best, bestPts, bestID
+    for _, c in ipairs(candidates) do
+        local list, pts = ReadTraitConfig(c.id)
+        if list and pts > 0 then return list, ("traits, config %d"):format(c.id) end
+        if list and not best then best, bestPts, bestID = list, pts, c.id end
+    end
+    if best then return best, ("traits, config %d"):format(bestID) end
+    return nil
+end
+
+local function ReadTalentsLegacy()
+    if not (GetNumTalentTabs and GetNumTalents) then return nil end
+    local list = {}
+    local okAll = pcall(function()
+        for tab = 1, (GetNumTalentTabs() or 0) do
+            for i = 1, (GetNumTalents(tab) or 0) do
+                local name, rank, maxRank
+                if GetTalentInfo then
+                    local n, _, _, _, r, m = GetTalentInfo(tab, i)
+                    name, rank, maxRank = n, r, m
+                end
+                if not name and C_SpecializationInfo and C_SpecializationInfo.GetTalentInfo then
+                    local info = Call(C_SpecializationInfo.GetTalentInfo, { specializationIndex = tab, talentIndex = i })
+                    if type(info) == "table" then name, rank, maxRank = info.name, info.rank, info.maxRank end
+                end
+                if name and type(rank) == "number" and rank > 0 then
+                    list[#list + 1] = { name = name, rank = rank, maxRank = maxRank or rank, tab = tab, index = i }
+                end
+            end
+        end
     end)
+    if okAll then return list, "talent tabs" end
+end
+
+-- Reads talents once per refresh; the result is cached for the cast-learning code.
+function HRA:ReadTalents()
+    local list, method = ReadTalentsTraits()
+    if not list or #list == 0 then
+        local l2, m2 = ReadTalentsLegacy()
+        if l2 and (#l2 > 0 or not list) then list, method = l2, m2 end
+    end
+    list = list or {}
+    table.sort(list, function(a, b) return a.name < b.name end)
+    local parts = {}
+    for _, t in ipairs(list) do parts[#parts + 1] = t.name .. "=" .. t.rank end
+    self.talents, self.talentMethod = list, method or "none found"
+    self.lastSig = table.concat(parts, ";")
+    return list
+end
+
+local function TalentSig()
+    if HRA.lastSig then return HRA.lastSig end
+    HRA:ReadTalents()
+    return HRA.lastSig
+end
+
+local function TooltipLines(data)
+    local parts = {}
+    if type(data) ~= "table" or type(data.lines) ~= "table" then return parts end
+    for idx, line in ipairs(data.lines) do
+        local tx = line.leftText
+        if idx > 1 and type(tx) == "string" and not Secret(tx) then
+            if tx:lower():find("^next rank") then break end
+            parts[#parts + 1] = Clean(tx)
+        end
+    end
+    return parts
+end
+
+-- Text of a talent at its CURRENT rank. Returns text, fromTooltip.
+local function TalentText(t)
+    local parts = {}
+    if t.entryID then
+        if C_TooltipInfo and C_TooltipInfo.GetTraitEntry then
+            parts = TooltipLines(Call(C_TooltipInfo.GetTraitEntry, t.entryID, t.rank))
+        end
+        if #parts == 0 and scanTip.SetTraitEntry then
+            scanTip:SetOwner(WorldFrame, "ANCHOR_NONE")
+            scanTip:ClearLines()
+            if pcall(scanTip.SetTraitEntry, scanTip, t.entryID, t.rank) then
+                for idx = 2, scanTip:NumLines() do
+                    local fs = _G["HRAScanTooltipTextLeft" .. idx]
+                    local tx = fs and fs:GetText()
+                    if type(tx) == "string" and not Secret(tx) then
+                        if tx:lower():find("^next rank") then break end
+                        parts[#parts + 1] = Clean(tx)
+                    end
+                end
+            end
+            scanTip:Hide()
+        end
+    elseif t.tab and t.index then
+        scanTip:SetOwner(WorldFrame, "ANCHOR_NONE")
+        scanTip:ClearLines()
+        if pcall(scanTip.SetTalent, scanTip, t.tab, t.index) then
+            for idx = 2, scanTip:NumLines() do
+                local fs = _G["HRAScanTooltipTextLeft" .. idx]
+                local tx = fs and fs:GetText()
+                if type(tx) == "string" then
+                    if tx:lower():find("^next rank") then break end
+                    parts[#parts + 1] = Clean(tx)
+                end
+            end
+        end
+        scanTip:Hide()
+    end
+    if #parts > 0 then return table.concat(parts, ". "), true end
+    -- Last resort: the talent spell's own description (may only describe rank 1)
+    if t.spellID then return SpellDesc(t.spellID), false end
+    return "", false
+end
+
+function HRA:GetTalentMods(talents)
+    local mods = { cast = {}, dur = {}, heal = {}, cost = {}, crit = {} }
+    talents = talents or self.talents or self:ReadTalents()
+    for _, t in ipairs(talents) do
+        local name, rank = t.name, t.rank
+        local src = ("%s %d"):format(name, rank)
+        local fb = ns.TALENT_FALLBACK[name]
+        local text, fromTooltip = TalentText(t)
+        local found = false
+        -- A spell description only shows rank 1; for multi-rank talents with a
+        -- fallback entry, trust the fallback (it multiplies by your rank) instead.
+        if text ~= "" and (fromTooltip or (t.maxRank or 1) <= 1 or not fb) then
+            found = ns.ParseTalentText(text, mods, src)
+        end
+        if not found and fb then
+            local mult = fb.perRank and rank or 1
+            for sp, v in pairs(fb.cast or {}) do AddMod(mods.cast, sp, v * mult, src .. "*") end
+            for sp, v in pairs(fb.dur  or {}) do AddMod(mods.dur,  sp, v * mult, src .. "*") end
+            for sp, v in pairs(fb.heal or {}) do AddMod(mods.heal, sp, v * mult, src .. "*") end
+            for sp, v in pairs(fb.cost or {}) do AddMod(mods.cost, sp, v * mult, src .. "*") end
+            for sp, v in pairs(fb.crit or {}) do AddMod(mods.crit, sp, v * mult, src .. "*") end
+        end
+    end
     return mods
 end
 
@@ -713,14 +925,11 @@ function HRA:ComputeEntry(e, mods, sig, bonus, critPct, playerLevel)
     local hotBase    = includes and math.max(hot - bH, 0) or hot
 
     -- ---- Crit (direct portion only) ----
-    -- School-wide crit talents ("your Holy spells") may already be in the client's
-    -- school crit: compare it with your lowest other-school crit to find out.
-    -- Spell-specific ones ("your Regrowth spell", "instant cast spells") never are.
-    local schoolInClient = false
-    if critSchoolWide > 0 and ctx.critRef then
-        schoolInClient = (critPct - ctx.critRef) >= critSchoolWide - 0.3
-    end
-    local critAdd   = critTal - (schoolInClient and critSchoolWide or 0)
+    -- The character sheet / GetSpellCritChance() shows your base spell crit only:
+    -- crit talents (Holy Specialization, Improved Regrowth, ...) are never in it
+    -- (verified in game: 6.9% with 0 and with 5 points in Holy Specialization),
+    -- so every crit talent that applies to this spell is added on top.
+    local critAdd   = critTal
     local critTotal = Clamp(critPct + critAdd, 0, 100)
     local critMult = 1
     if DB.crit and direct > 0 then critMult = 1 + (critTotal / 100) * 0.5 end
@@ -765,7 +974,7 @@ function HRA:ComputeEntry(e, mods, sig, bonus, critPct, playerLevel)
     row.cd, row.ch, row.mult = cd, ch, mult
     row.healPct, row.healSrc, row.healIncluded, row.healVerified, row.extraMult = healPct, healSrc, healIncluded, healVerified, extraMult
     row.costPct, row.costSrc, row.clientCost, row.costState = costPct, costSrc, clientCost, costState
-    row.critTal, row.critSrc, row.critSchoolWide, row.schoolInClient = critTal, critSrc, critSchoolWide, schoolInClient
+    row.critTal, row.critSrc = critTal, critSrc
     row.critAdd, row.critClient, row.critTotal = critAdd, critPct, critTotal
     row.bonusShare, row.shareMeasured = share, measured
     row.slope, row.slopeLo, row.slopeHi = slope, sLo, sHi
@@ -786,22 +995,19 @@ function HRA:ComputeRows()
     local _, class = UnitClass("player")
     local level = UnitLevel("player")
     local entries = self:BuildEntries()
-    local mods = self:GetTalentMods()
-    local sig = TalentSig()
+    local talents = self:ReadTalents()
+    local mods = self:GetTalentMods(talents)
+    local sig = self.lastSig
     local bonus = GetSpellBonusHealing and GetSpellBonusHealing() or 0
+    if Secret(bonus) or type(bonus) ~= "number" then bonus = 0 end
     local school = ns.CLASS_SCHOOL[class] or 2
     local critPct = GetSpellCritChance and GetSpellCritChance(school) or 0
-    -- Lowest crit among your other spell schools = crit without school-specific talents
-    local critRef
-    if GetSpellCritChance then
-        for sch = 2, 7 do
-            if sch ~= school then
-                local c = GetSpellCritChance(sch)
-                if c and (not critRef or c < critRef) then critRef = c end
-            end
-        end
-    end
-    self.ctx = { school = school, critRef = critRef }
+    if Secret(critPct) or type(critPct) ~= "number" then critPct = 0 end
+    self.ctx = { school = school }
+    -- Crit talents that cover all your heals (e.g. Holy Specialization), for the header line
+    local schoolKey = (school == 2 and "@holy") or (school == 4 and "@nature") or nil
+    local critTalent = (mods.crit["*"] and mods.crit["*"].amount or 0)
+        + (schoolKey and mods.crit[schoolKey] and mods.crit[schoolKey].amount or 0)
 
     local rows = {}
     for _, e in ipairs(entries) do
@@ -809,7 +1015,7 @@ function HRA:ComputeRows()
         if show then rows[#rows + 1] = self:ComputeEntry(e, mods, sig, bonus, critPct, level) end
     end
     self.lastMods = mods
-    return rows, { level = level, class = class, bonus = bonus, crit = critPct, school = school }
+    return rows, { level = level, class = class, bonus = bonus, crit = critPct, critTalent = critTalent, school = school }
 end
 
 -- ============================================================
@@ -818,7 +1024,7 @@ end
 local MainFrame
 local ROWS = {}
 local LH = 18
-local FRAME_W, FRAME_H = 720, 540
+local FRAME_W, FRAME_H = 770, 540
 local SCROLL_LEFT = 20          -- scroll area inset from the window's left edge
 local CHILD_W = FRAME_W - SCROLL_LEFT - 40
 
@@ -844,6 +1050,7 @@ local COLS = {
     { key = "cast",  label = "Cast",     w = 54,  justify = "RIGHT" },
     { key = "dur",   label = "HoT",      w = 40,  justify = "RIGHT" },
     { key = "mana",  label = "Mana",     w = 48,  justify = "RIGHT",  sort = "mana" },
+    { key = "crit",  label = "Crit",     w = 46,  justify = "RIGHT" },
     { key = "heal",  label = "Avg Heal", w = 70,  justify = "RIGHT",  sort = "total" },
     { key = "hps",   label = "HPS",      w = 60,  justify = "RIGHT",  sort = "hps" },
     { key = "hpm",   label = "HPM",      w = 56,  justify = "RIGHT",  sort = "hpm" },
@@ -942,11 +1149,9 @@ local function RowOnEnter(self)
     if DB.crit and r.direct > 0 then
         GT:AddDoubleLine("Crit:", ("%.1f%%  (x%.3f on direct part)"):format(r.critTotal, r.critMult), 0.8, 0.8, 0.8, 1, 1, 1)
         if r.critTal > 0 then
-            GT:AddLine(("  %.1f%% from character sheet + %s%% talents (%s)"):format(r.critClient, FmtSec(r.critAdd), r.critSrc), 0.6, 0.6, 0.6, true)
-            if r.critSchoolWide > 0 then
-                GT:AddLine(r.schoolInClient and "  school-wide crit talents already on character sheet"
-                    or "  school-wide crit talents added by addon", 0.6, 0.6, 0.6)
-            end
+            GT:AddLine(("  %.1f%% character sheet + %s%% talents (%s)"):format(r.critClient, FmtSec(r.critAdd), r.critSrc), 0.6, 0.6, 0.6, true)
+        else
+            GT:AddLine(("  %.1f%% character sheet, no crit talents for this spell"):format(r.critClient), 0.6, 0.6, 0.6, true)
         end
     end
 
@@ -1001,7 +1206,7 @@ local function GetRow(i)
         if fs.SetWordWrap then fs:SetWordWrap(false) end
         r.cells[col.key] = fs
     end
-    r:SetScript("OnEnter", RowOnEnter)
+    r:SetScript("OnEnter", function(self) Safe(RowOnEnter, self) end)
     r:SetScript("OnLeave", function() GameTooltip:Hide() end)
     ROWS[i] = r
     return r
@@ -1101,7 +1306,7 @@ local function MakeFrame()
         b.fs = fs
         b.col = col
         if col.sort then
-            b:SetScript("OnClick", function() DB.sort = col.sort; HRA:Refresh() end)
+            b:SetScript("OnClick", function() DB.sort = col.sort; Safe(HRA.Render, HRA) end)
             b:SetScript("OnEnter", function(self)
                 GameTooltip:SetOwner(self, "ANCHOR_TOP")
                 GameTooltip:AddLine(col.sort == "spell" and "Sort by spell & rank" or ("Sort by " .. col.label))
@@ -1143,7 +1348,7 @@ local function MakeFrame()
     f.legend:SetPoint("TOPRIGHT", f, "BOTTOMRIGHT", -24, 78)
     f.legend:SetJustifyH("LEFT")
     f.legend:SetTextColor(C.legend[1], C.legend[2], C.legend[3])
-    f.legend:SetText("Cast / HoT / Mana colour:  |cffe6d6aenormal|r = from game client,  "
+    f.legend:SetText("Cast / HoT / Mana / Crit colour:  |cffe6d6aenormal|r = from game client,  "
         .. "|cffffe64dyellow|r = talent applied by addon,  "
         .. "|cff66ff66green|r = confirmed by your own cast.   Bonus: ~ = estimated.   Hover a row for talent details.")
 
@@ -1163,7 +1368,7 @@ local function MakeFrame()
         fs:SetPoint("LEFT", cb, "RIGHT", 1, 1)
         fs:SetText(label)
         fs:SetTextColor(C.text[1], C.text[2], C.text[3])
-        cb:SetScript("OnClick", function(self) DB[key] = self:GetChecked() and true or false; HRA:Refresh() end)
+        cb:SetScript("OnClick", function(self) DB[key] = self:GetChecked() and true or false; Safe(HRA.Refresh, HRA) end)
         cb:SetScript("OnEnter", function(self)
             GameTooltip:SetOwner(self, "ANCHOR_TOP")
             GameTooltip:AddLine(label, 1, 0.82, 0)
@@ -1179,10 +1384,106 @@ local function MakeFrame()
     refresh:SetSize(110, 26)
     refresh:SetPoint("BOTTOMRIGHT", -20, 14)
     refresh:SetText("Refresh")
-    refresh:SetScript("OnClick", function() HRA:Refresh() end)
+    refresh:SetScript("OnClick", function() Safe(HRA.Refresh, HRA) end)
+
+    -- Cast-learning (HoT durations, mana spent) only listens while the table is open
+    f:SetScript("OnShow", function() HRA:SetLearning(true) end)
+    f:SetScript("OnHide", function() HRA:SetLearning(false) end)
 
     MainFrame = f
     return f
+end
+
+-- ============================================================
+-- ERROR WINDOW (/hra errors) — select all and copy
+-- ============================================================
+local ErrFrame
+function HRA:ShowErrors()
+    if #ERRORS == 0 then
+        print("|cff00ff96HealRankAdvisor:|r no errors caught this session.")
+        return
+    end
+    if not ErrFrame then
+        local f = CreateFrame("Frame", "HRAErrorFrame", UIParent)
+        f:SetSize(640, 400)
+        f:SetPoint("CENTER")
+        f:SetFrameStrata("FULLSCREEN_DIALOG")
+        f:SetClampedToScreen(true)
+        f:SetMovable(true)
+        f:EnableMouse(true)
+        f:RegisterForDrag("LeftButton")
+        f:SetScript("OnDragStart", f.StartMoving)
+        f:SetScript("OnDragStop", f.StopMovingOrSizing)
+        tinsert(UISpecialFrames, "HRAErrorFrame")
+
+        local bg = f:CreateTexture(nil, "BACKGROUND")
+        bg:SetColorTexture(C.bg[1], C.bg[2], C.bg[3], 0.97)
+        bg:SetAllPoints()
+        AddBorder(f, "BORDER",  C.outline, 1, 2, -2)
+        AddBorder(f, "BORDER",  C.gold,    1, 3,  0)
+        AddBorder(f, "ARTWORK", C.inner,   1, 1,  3)
+
+        local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        title:SetPoint("TOP", 0, -12)
+        title:SetText("Heal Rank Advisor — errors")
+        title:SetTextColor(1, 0.82, 0)
+
+        local hint = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        hint:SetPoint("TOP", 0, -34)
+        hint:SetTextColor(C.legend[1], C.legend[2], C.legend[3])
+        hint:SetText("Click in the box, press Ctrl+A to select everything, then Ctrl+C to copy.")
+
+        local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
+        close:SetPoint("TOPRIGHT", -4, -4)
+
+        local scroll = CreateFrame("ScrollFrame", "HRAErrorScroll", f, "UIPanelScrollFrameTemplate")
+        scroll:SetPoint("TOPLEFT", 20, -56)
+        scroll:SetPoint("BOTTOMRIGHT", -40, 50)
+
+        local eb = CreateFrame("EditBox", nil, scroll)
+        eb:SetMultiLine(true)
+        eb:SetAutoFocus(false)
+        eb:SetFontObject(ChatFontNormal)
+        eb:SetWidth(570)
+        eb:SetTextColor(C.text[1], C.text[2], C.text[3])
+        eb:SetScript("OnEscapePressed", function(self) self:ClearFocus(); f:Hide() end)
+        -- read-only: undo any typing
+        eb:SetScript("OnTextChanged", function(self, userInput)
+            if userInput and self.fullText then self:SetText(self.fullText); self:HighlightText() end
+        end)
+        scroll:SetScrollChild(eb)
+        f.eb = eb
+
+        local clear = CreateFrame("Button", nil, f, "GameMenuButtonTemplate")
+        clear:SetSize(110, 26)
+        clear:SetPoint("BOTTOMRIGHT", -20, 14)
+        clear:SetText("Clear")
+        clear:SetScript("OnClick", function()
+            wipe(ERRORS)
+            errorNotified = false
+            f:Hide()
+        end)
+        ErrFrame = f
+    end
+
+    local lines = {}
+    local version, build, _, toc = "?", "?", nil, "?"
+    if GetBuildInfo then version, build, _, toc = GetBuildInfo() end
+    lines[#lines + 1] = ("HealRankAdvisor %s  |  client %s (%s, toc %s)  |  %s level %d"):format(
+        VERSION, tostring(version), tostring(build), tostring(toc),
+        select(2, UnitClass("player")) or "?", UnitLevel("player") or 0)
+    for i, e in ipairs(ERRORS) do
+        lines[#lines + 1] = ""
+        lines[#lines + 1] = ("#%d  [%s]  x%d  %s"):format(i, e.time, e.count, e.msg)
+        if e.stack and e.stack ~= "" then lines[#lines + 1] = e.stack end
+    end
+    local text = table.concat(lines, "\n")
+    local eb = ErrFrame.eb
+    eb.fullText = text
+    eb:SetText(text)
+    ErrFrame:Show()
+    eb:SetFocus()
+    eb:HighlightText()
 end
 
 local function SortRows(rows)
@@ -1206,13 +1507,18 @@ end
 local CLASS_DISPLAY = { PRIEST = "Priest", DRUID = "Druid", PALADIN = "Paladin", SHAMAN = "Shaman" }
 local retries = 0
 
-function HRA:Refresh()
+-- Recalculates every row. Only runs when you open the table for the first time,
+-- click Refresh, or change one of the options.
+function HRA:Recalculate()
+    local rows, info = self:ComputeRows()
+    self.rows, self.info = rows, info
+    self.updatedAt = date and date("%H:%M") or ""
+end
+
+-- Draws the last calculated rows (no recalculation).
+function HRA:Render()
     local f = MakeFrame()
-    local ok, rows, info = pcall(self.ComputeRows, self)
-    if not ok then
-        print("|cffff4040HealRankAdvisor error:|r " .. tostring(rows))
-        return
-    end
+    local rows, info = self.rows or {}, self.info or {}
     SortRows(rows)
 
     for key, cb in pairs(f.checks) do cb:SetChecked(DB[key]) end
@@ -1265,7 +1571,7 @@ function HRA:Refresh()
         set("level", (r.level and r.level > 0) and tostring(r.level) or "-")
 
         if r.pending then
-            set("bonus", ""); set("cast", ""); set("dur", ""); set("mana", ""); set("hps", ""); set("hpm", "")
+            set("bonus", ""); set("cast", ""); set("dur", ""); set("mana", ""); set("crit", ""); set("hps", ""); set("hpm", "")
             set("heal", "loading...", COLOR.grey)
         else
             local castText
@@ -1285,6 +1591,13 @@ function HRA:Refresh()
             set("dur", (r.effDur and not r.channel) and (FmtSec(r.effDur) .. "s") or "-", durCol)
             local manaCol = (r.costState == "applied" and COLOR.yellow) or (r.costState == "observed" and COLOR.green) or nil
             set("mana", FmtInt(r.mana), manaCol)
+            -- Crit chance of the direct part (HoTs don't crit). Yellow = includes talents.
+            if r.direct > 0 then
+                local critCol = (not DB.crit and COLOR.grey) or (r.critAdd > 0 and COLOR.yellow) or nil
+                set("crit", ("%.1f%%"):format(r.critTotal), critCol)
+            else
+                set("crit", "-")
+            end
             set("heal", FmtInt(r.total))
             set("hps", r.hps and ("%.1f"):format(r.hps) or "-", { Grad(r.hps, hpsLo, hpsHi) })
             set("hpm", r.hpm and ("%.2f"):format(r.hpm) or "-", { Grad(r.hpm, hpmLo, hpmHi) })
@@ -1303,34 +1616,45 @@ function HRA:Refresh()
         f.empty:Hide()
     end
 
-    f.info:SetText(("Level %d %s   |cff7d705a•|r   +Healing %s%s   |cff7d705a•|r   %s crit %.1f%%"):format(
-        info.level, CLASS_DISPLAY[info.class] or (info.class or "?"):lower(),
+    local critText = ("%.1f%%"):format(info.crit or 0)
+    if (info.critTalent or 0) > 0 then
+        critText = ("%.1f%% |cff7d705a(%.1f%% + %s%% talents)|r"):format((info.crit or 0) + info.critTalent,
+            info.crit or 0, FmtSec(info.critTalent))
+    end
+    if not DB.crit then critText = critText .. " |cff7d705a(off)|r" end
+    f.info:SetText(("Level %d %s   |cff7d705a•|r   +Healing %s%s   |cff7d705a•|r   %s crit %s   |cff7d705a•|r   Updated %s"):format(
+        info.level or 0, CLASS_DISPLAY[info.class] or (info.class or "?"):lower(),
         FmtInt(info.bonus), DB.bonus and "" or " |cff7d705a(off)|r",
-        ns.SCHOOL_NAME[info.school] or "Spell", info.crit or 0))
+        ns.SCHOOL_NAME[info.school] or "Spell", critText, self.updatedAt or "-"))
 
     f:Show()
+    self.hasPending = pending
+end
 
-    -- Spell descriptions can arrive a moment later the first time
-    if pending and retries < 5 then
+-- Recalculate + redraw. Triggered only by the Refresh button, an option change,
+-- or opening the table for the first time.
+function HRA:Refresh(isRetry)
+    if not isRetry then retries = 0 end
+    self:Recalculate()
+    self:Render()
+    -- Spell descriptions can arrive a moment after the first request: retry a few
+    -- times right after a refresh you asked for, then stop.
+    if self.hasPending and retries < 3 then
         retries = retries + 1
-        C_Timer.After(1, function() if MainFrame:IsShown() then HRA:Refresh() end end)
-    elseif not pending then
-        retries = 0
+        C_Timer.After(1, function()
+            Safe(function() if MainFrame and MainFrame:IsShown() then HRA:Refresh(true) end end)
+        end)
     end
 end
 
-local refreshQueued = false
-function HRA:RequestRefresh(delay)
-    if refreshQueued then return end
-    refreshQueued = true
-    C_Timer.After(delay or 0.3, function()
-        refreshQueued = false
-        if MainFrame and MainFrame:IsShown() then HRA:Refresh() end
-    end)
-end
-
 function HRA:Toggle()
-    if MainFrame and MainFrame:IsShown() then MainFrame:Hide() else self:Refresh() end
+    if MainFrame and MainFrame:IsShown() then
+        MainFrame:Hide()
+    elseif self.rows then
+        self:Render()          -- show the last results; click Refresh to update them
+    else
+        self:Refresh()
+    end
 end
 
 -- ============================================================
@@ -1351,7 +1675,6 @@ local function ResolveCost(spellID, spent)
     if not spent or spent <= 0 then return end
     local client = ManaCost(spellID)
     if client <= 0 then return end
-    if HRA.costPct[spellID] == nil then pcall(HRA.ComputeRows, HRA) end
     local pct = HRA.costPct[spellID] or 0
     local tol = math.max(1, client * 0.015)
     local mode
@@ -1367,13 +1690,13 @@ local function ResolveCost(spellID, spent)
         DB.costMode = mode
         print(("|cff00ff96HealRankAdvisor:|r mana cost talents are %s."):format(
             mode == "client" and "already included in the game's spell costs"
-            or "NOT included in the game's spell costs; the addon now applies them"))
+            or "NOT included in the game's spell costs; the addon now applies them. Click Refresh to update"))
     end
-    HRA:RequestRefresh()
 end
 
 local function OnManaChanged()
     local cur = UnitPower("player", 0)
+    if type(cur) ~= "number" or Secret(cur) then manaTrack.last = nil; return end   -- secret in combat: skip
     local now = GetTime()
     if manaTrack.last and cur < manaTrack.last then
         local drop = manaTrack.last - cur
@@ -1400,9 +1723,11 @@ end
 
 local function ObserveHot(spellID, castAt)
     local units = { "target", "player", "focus", "mouseover", "party1", "party2", "party3", "party4" }
-    if IsInRaid and IsInRaid() then for i = 1, 40 do units[#units + 1] = "raid" .. i end end
+    local inRaid = IsInRaid and IsInRaid()
+    if inRaid and not Secret(inRaid) then for i = 1, 40 do units[#units + 1] = "raid" .. i end end
     for _, u in ipairs(units) do
-        if UnitExists(u) then
+        local exists = UnitExists(u)
+        if exists and not Secret(exists) then
             local found
             ForEachAura(u, "HELPFUL", function(sid, dur, exp, src)
                 if sid == spellID and dur and dur > 0 and exp and (src == "player" or src == nil)
@@ -1417,10 +1742,9 @@ local function ObserveHot(spellID, castAt)
                 DB.observed[spellID] = { dur = rounded, sig = TalentSig() }
                 if not prev or prev.dur ~= rounded then
                     local sub = SpellSubtext(spellID)
-                    print(("|cff00ff96HealRankAdvisor:|r %s%s lasts |cffffff00%ss|r"):format(
+                    print(("|cff00ff96HealRankAdvisor:|r %s%s lasts |cffffff00%ss|r (click Refresh to update the table)"):format(
                         SpellName(spellID) or "?", (sub and sub ~= "") and (" (" .. sub .. ")") or "", FmtSec(rounded)))
                 end
-                HRA:RequestRefresh()
                 return
             end
         end
@@ -1432,18 +1756,27 @@ end
 -- ============================================================
 SLASH_HEALRANKADVISOR1 = "/hra"
 SLASH_HEALRANKADVISOR2 = "/healranks"
-SlashCmdList["HEALRANKADVISOR"] = function(msg)
+local function SlashHandler(msg)
     msg = strtrim and strtrim((msg or ""):lower()) or (msg or ""):lower()
-    if msg == "help" then
+    if msg == "errors" then
+        HRA:ShowErrors()
+        return
+    elseif msg == "help" then
         print("|cff00ff96HealRankAdvisor|r commands:")
         print("  /hra            Toggle the table")
-        print("  /hra talents    Show talents detected as changing cast time / HoT duration")
+        print("  /hra talents    List your talents and the effects found on your heals")
         print("  /hra debug      Print the parsed values for every row")
         print("  /hra resetobs   Forget learned HoT durations, mana costs and measurements")
+        print("  /hra errors     Show caught errors in a window you can copy from")
         return
     elseif msg == "talents" then
-        local mods = HRA:GetTalentMods()
+        local talents = HRA:ReadTalents()
+        local mods = HRA:GetTalentMods(talents)
         local any = false
+        print(("|cff00ff96HealRankAdvisor|r found %d talents with points (%s)."):format(#talents, HRA.talentMethod or "?"))
+        local names = {}
+        for _, t in ipairs(talents) do names[#names + 1] = ("%s %d/%d"):format(t.name, t.rank, t.maxRank or t.rank) end
+        if #names > 0 then print("  " .. table.concat(names, ", ")) end
         print("|cff00ff96HealRankAdvisor|r talent effects found:")
         for sp, m in pairs(mods.cast) do any = true; print(("  %s: cast time -%ss  (%s)"):format(sp, FmtSec(m.amount), table.concat(m.sources, ", "))) end
         for sp, m in pairs(mods.dur)  do any = true; print(("  %s: duration +%ss  (%s)"):format(sp, FmtSec(m.amount), table.concat(m.sources, ", "))) end
@@ -1473,7 +1806,7 @@ SlashCmdList["HEALRANKADVISOR"] = function(msg)
         wipe(DB.observed)
         DB.costObs, DB.costMode, DB.healMode, DB.samples = {}, nil, {}, {}
         print("|cff00ff96HealRankAdvisor:|r learned durations, mana costs and measurements cleared.")
-        HRA:RequestRefresh(0)
+        if MainFrame and MainFrame:IsShown() then HRA:Refresh() end
         return
     elseif msg == "refresh" then
         HRA:Refresh()
@@ -1481,6 +1814,7 @@ SlashCmdList["HEALRANKADVISOR"] = function(msg)
     end
     HRA:Toggle()
 end
+SlashCmdList["HEALRANKADVISOR"] = function(msg) Safe(SlashHandler, msg) end
 
 -- ============================================================
 -- EVENTS
@@ -1495,7 +1829,21 @@ end
 Reg("ADDON_LOADED")
 Reg("PLAYER_LOGIN")
 
-ev:SetScript("OnEvent", function(self, event, ...)
+-- Cast-learning listeners are registered only while the table window is open.
+function HRA:SetLearning(on)
+    if on then
+        Reg("UNIT_SPELLCAST_SUCCEEDED", "player")
+        Reg("UNIT_POWER_FREQUENT", "player")
+        local mana = UnitPower("player", 0)
+        manaTrack.last = (type(mana) == "number" and not Secret(mana)) and mana or nil
+    else
+        ev:UnregisterEvent("UNIT_SPELLCAST_SUCCEEDED")
+        ev:UnregisterEvent("UNIT_POWER_FREQUENT")
+        manaTrack.last, manaTrack.pending, manaTrack.lastDrop = nil, nil, nil
+    end
+end
+
+local function OnEvent(self, event, ...)
     if event == "ADDON_LOADED" then
         if ... ~= ADDON_NAME then return end
         HealRankAdvisorCharDB = HealRankAdvisorCharDB or {}
@@ -1506,35 +1854,22 @@ ev:SetScript("OnEvent", function(self, event, ...)
         self:UnregisterEvent("ADDON_LOADED")
 
     elseif event == "PLAYER_LOGIN" then
-        for _, e in ipairs({ "SPELLS_CHANGED", "LEARNED_SPELL_IN_TAB", "PLAYER_LEVEL_UP",
-                             "CHARACTER_POINTS_CHANGED", "PLAYER_TALENT_UPDATE",
-                             "PLAYER_EQUIPMENT_CHANGED", "SPELL_DATA_LOAD_RESULT" }) do
-            Reg(e)
-        end
-        Reg("UNIT_STATS", "player")
-        Reg("UNIT_SPELLCAST_SUCCEEDED", "player")
-        Reg("UNIT_POWER_FREQUENT", "player")
-        manaTrack.last = UnitPower("player", 0)
-        -- Discover auto-detected HoTs in the background so their durations can be learned
-        C_Timer.After(3, function() pcall(HRA.BuildEntries, HRA) end)
+        self:UnregisterEvent("PLAYER_LOGIN")
         print(("|cff00ff96HealRankAdvisor %s|r loaded  —  /hra to open, /hra help for options"):format(VERSION))
 
     elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
         local unit, _, spellID = ...
-        if unit == "player" and spellID and ns.HOT_IDS[spellID] then
+        if unit ~= "player" or not spellID then return end
+        if ns.HOT_IDS[spellID] then
             local castAt = GetTime()
-            C_Timer.After(0.3, function() ObserveHot(spellID, castAt) end)
+            C_Timer.After(0.3, function() Safe(ObserveHot, spellID, castAt) end)
         end
-        if unit == "player" and spellID and ns.TRACK_IDS[spellID] then OnHealCast(spellID) end
+        if ns.TRACK_IDS[spellID] then OnHealCast(spellID) end
 
     elseif event == "UNIT_POWER_FREQUENT" then
         local unit, ptype = ...
         if unit == "player" and (ptype == "MANA" or ptype == nil) then OnManaChanged() end
-
-    elseif event == "SPELL_DATA_LOAD_RESULT" then
-        HRA:RequestRefresh(0.5)
-
-    else
-        HRA:RequestRefresh(0.5)
     end
-end)
+end
+
+ev:SetScript("OnEvent", function(self, event, ...) Safe(OnEvent, self, event, ...) end)

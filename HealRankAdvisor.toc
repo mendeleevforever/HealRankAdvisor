@@ -2,7 +2,7 @@
 ## Title: Heal Rank Advisor
 ## Notes: Healing per Second and Healing per Mana for every healing spell rank you can use
 ## Author: You
-## Version: 1.4.0
+## Version: 1.7.0
 ## SavedVariablesPerCharacter: HealRankAdvisorCharDB
 
 Data.lua
