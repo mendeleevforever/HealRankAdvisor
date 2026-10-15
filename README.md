@@ -68,6 +68,6 @@ Holy Light Rank 4 not yet trained.
 
 HRA as shown on an undead level 30 discipline priest. (OLD GUI)
 
-<img width="839" height="651" alt="HealRankAdvisor screenshot 4" src="https://github.com/user-attachments/assets/738fe531-e6a4-43f4-a5e3-f3ea046d910a" />
+<img width="933" height="717" alt="HealRankAdvisor screenshot 2" src="https://github.com/user-attachments/assets/2161e752-534b-4960-ad44-7252b62a349b" />
 
-HRA as shown on an undead level 30 holy priest. (OLD GUI)
+HRA as shown on an undead level 30 holy priest.
