@@ -95,8 +95,10 @@ ns.SPELLS = {
 -- The addon reads your talent tooltips and understands lines like
 --   "Reduces the casting time of your Heal and Greater Heal spells by 0.5 sec"
 --   "Increases the duration of your Rejuvenation spell by 3 sec, your Regrowth spell by 6 sec"
---   "Increases the amount healed by your Renew spell by 15%"   (heal = { spell = pct })
---   ("*" = all heals, "@instant" = instant-cast heals)
+--   "Increases the amount healed by your Renew spell by 15%"            (heal = { spell = pct })
+--   "Reduces the mana cost of your Smite, Holy Fire, and instant cast spells by 9%"   (cost)
+--   "Increases the critical effect chance of your Holy spells by 5%"     (crit)
+--   ("*" = all heals, "@instant" = instant casts, "@holy" / "@nature" = that school)
 -- so new WoW Forever talents are picked up automatically.
 -- The table below is only used if a talent's tooltip can't be read/understood.
 -- perRank = true  -> value is multiplied by the talent's current rank.
@@ -108,9 +110,25 @@ ns.TALENT_FALLBACK = {
     ["Improved Healing Wave"]  = { perRank = true, cast = { ["healing wave"] = 0.1 } },
     ["Improved Healing Touch"] = { perRank = true, cast = { ["healing touch"] = 0.1 } },
     ["Naturalist"]             = { perRank = true, cast = { ["healing touch"] = 0.1 } },
+    -- Healing %
     ["Improved Renew"]         = { perRank = true, heal = { ["renew"] = 5 } },
     ["Spiritual Healing"]      = { perRank = true, heal = { ["*"] = 3 } },
     ["Twin Disciplines"]       = { perRank = true, heal = { ["@instant"] = 1 } },
+    ["Improved Rejuvenation"]  = { perRank = true, heal = { ["rejuvenation"] = 5 } },
+    ["Gift of Nature"]         = { perRank = true, heal = { ["*"] = 2 } },
+    ["Healing Light"]          = { perRank = true, heal = { ["holy light"] = 4, ["flash of light"] = 4 } },
+    ["Purification"]           = { perRank = true, heal = { ["*"] = 2 } },
+    -- Mana cost %
+    ["Mental Agility"]         = { perRank = true, cost = { ["@instant"] = 3 } },
+    ["Improved Healing"]       = { perRank = true, cost = { ["lesser heal"] = 5, ["heal"] = 5, ["greater heal"] = 5 } },
+    ["Tranquil Spirit"]        = { perRank = true, cost = { ["healing touch"] = 2, ["tranquility"] = 2 } },
+    ["Moonglow"]               = { perRank = true, cost = { ["healing touch"] = 3, ["regrowth"] = 3, ["rejuvenation"] = 3 } },
+    ["Tidal Focus"]            = { perRank = true, cost = { ["*"] = 1 } },
+    -- Crit chance %
+    ["Holy Specialization"]    = { perRank = true, crit = { ["@holy"] = 1 } },
+    ["Holy Power"]             = { perRank = true, crit = { ["@holy"] = 1 } },
+    ["Improved Regrowth"]      = { perRank = true, crit = { ["regrowth"] = 5 } },
+    ["Tidal Mastery"]          = { perRank = true, crit = { ["*"] = 1 } },
 }
 
 -- Spells that mention healing but don't belong in a heal-efficiency table.

@@ -7,7 +7,7 @@ local HRA = {}
 _G.HealRankAdvisor = HRA
 ns.HRA = HRA
 
-local VERSION = "1.3.0"
+local VERSION = "1.4.0"
 local GCD     = 1.5
 local DB
 
@@ -18,6 +18,8 @@ local DEFAULTS = {
     untrained     = true,   -- show ranks available at your level but not trained
     hotByDuration = false,  -- HoT HPS = total / HoT duration instead of / cast time
     samples       = {},     -- [spellID] = tooltip values at low/high +healing, to measure coefficients
+    costObs       = {},     -- [spellID] = { cost = mana actually spent, client = client cost, sig }
+    healMode      = {},     -- [spell name] = whether talent healing % is in the tooltip
     sort          = "spell",
     observed      = {},     -- [spellID] = { dur = seconds, sig = talentSignature }
 }
@@ -284,42 +286,88 @@ local function AddMod(tbl, spell, amount, src)
     m.sources[#m.sources + 1] = src
 end
 
-function ns.ParseTalentText(text, cast, dur, src, heal)
+-- Turns "your Smite, Holy Fire, and instant cast spells" into spell names / categories:
+--   "*" = all heals, "@instant" = instant casts, "@holy" / "@nature" = that school
+local function TalentTargets(chunk)
+    chunk = chunk:gsub("^%s+", ""):gsub("%s+$", "")
+    chunk = chunk:match(".*your (.*)") or chunk:match(".* of (.*)") or chunk
+    chunk = chunk:gsub(" spells?$", ""):gsub(" abilit%a+$", "")
+    local out = {}
+    for _, n in ipairs(SplitNames(chunk)) do
+        n = n:gsub(" spells?$", ""):gsub("^the ", "")
+        if n == "spells" or n == "healing" or n == "heals" or n == "healing spell" then
+            out[#out + 1] = "*"
+        elseif n:find("instant") then
+            out[#out + 1] = "@instant"
+        elseif n == "holy" then
+            out[#out + 1] = "@holy"
+        elseif n == "nature" then
+            out[#out + 1] = "@nature"
+        elseif n ~= "" then
+            out[#out + 1] = n
+        end
+    end
+    return out
+end
+
+local function Pct(str) return str and tonumber((str:gsub("%.$", ""))) end
+
+-- Reads one talent's tooltip text into mods.{cast, dur, heal, cost, crit}.
+-- Only the talent's CURRENT rank text is passed in, so values are already per rank.
+function ns.ParseTalentText(text, mods, src)
     local t = text:lower() .. ". "
     local found = false
     for clause in t:gmatch("(.-)%.%s") do
-        -- Healing % talents: "Increases the amount healed by your Renew spell by 15%",
-        -- "...healed by your spells by 3%", "...damage and healing of your instant cast spells by 5%"
-        if heal and clause:find("increas") and (clause:find("heal") or clause:find("effect of your")) then
-            local chunk, pct = clause:match("healed by your (.-) by ([%d%.]+)%%")
-            if not chunk then chunk, pct = clause:match("effect of your (.-) by ([%d%.]+)%%") end
-            if not chunk then chunk, pct = clause:match("healing done by your (.-) by ([%d%.]+)%%") end
-            if not chunk then chunk, pct = clause:match("healing of your (.-) by ([%d%.]+)%%") end
-            pct = pct and tonumber((pct:gsub("%.$", "")))
+        local conditional = clause:find("when activated") or clause:find("your next") or clause:find(" when cast on")
+            or clause:find("after ") or clause:find("chance to ")
+
+        -- Mana cost: "Reduces the mana cost of your Smite, Holy Fire, and instant cast spells by 9%"
+        if clause:find("mana cost") and (clause:find("reduc") or clause:find("decreas") or clause:find("lower"))
+           and not conditional then
+            local chunk, pct = clause:match("mana cost of (.-) by ([%d%.]+)%%")
+            pct = Pct(pct)
             if chunk and pct and pct > 0 then
-                chunk = chunk:gsub("^%s+", ""):gsub("%s+$", "")
-                if chunk == "spells" or chunk == "healing spells" then
-                    AddMod(heal, "*", pct, src)
-                elseif chunk:find("instant") then
-                    AddMod(heal, "@instant", pct, src)
-                else
-                    chunk = chunk:gsub(" spells?$", "")
-                    for _, n in ipairs(SplitNames(chunk)) do AddMod(heal, n, pct, src) end
-                end
+                for _, n in ipairs(TalentTargets(chunk)) do AddMod(mods.cost, n, pct, src) end
+                found = true
+            end
+
+        -- Crit: "Increases the critical effect chance of your Holy spells by 5%"
+        elseif clause:find("critical") and clause:find("chance") and clause:find("increas") and not conditional then
+            local chunk, pct = clause:match("critical %a+ chance of (.-) by ([%d%.]+)%%")
+            if not chunk then chunk, pct = clause:match("critical %a+ chance for (.-) by ([%d%.]+)%%") end
+            pct = Pct(pct)
+            if chunk and pct and pct > 0 then
+                for _, n in ipairs(TalentTargets(chunk)) do AddMod(mods.crit, n, pct, src) end
+                found = true
+            end
+
+        -- Healing %: "Increases the amount healed by your Renew spell by 15%",
+        -- "...damage and healing of your instant cast spells by 5%", "...effect of your Rejuvenation spell by 15%"
+        elseif clause:find("increas") and (clause:find("heal") or clause:find("effect of your")) and not conditional
+               and not clause:find("duration") then
+            local chunk, pct = clause:match("healed by (.-) by ([%d%.]+)%%")
+            if not chunk then chunk, pct = clause:match("effect of (your .-) by ([%d%.]+)%%") end
+            if not chunk then chunk, pct = clause:match("healing done by (.-) by ([%d%.]+)%%") end
+            if not chunk then chunk, pct = clause:match("healing of (.-) by ([%d%.]+)%%") end
+            pct = Pct(pct)
+            if chunk and pct and pct > 0 then
+                for _, n in ipairs(TalentTargets(chunk)) do AddMod(mods.heal, n, pct, src) end
                 found = true
             end
         end
-        local isDur  = clause:find("duration") and (clause:find("increas") or clause:find("extend"))
-        local isCast = (not isDur) and clause:find("cast")
+
+        -- Cast time / HoT duration: "...by 0.5 sec"
+        local isDur  = clause:find("increases? the duration") or (clause:find("duration") and clause:find("extend"))
+        local isCast = (not isDur) and clause:find("cast%a* time") and not clause:find("mana cost")
                        and (clause:find("reduc") or clause:find("decreas") or clause:find("shorten"))
         if isDur or isCast then
             for chunk, amt in clause:gmatch("([^%d]-) by ([%d%.]+) sec") do
                 local names = chunk:match(".*your (.*)") or chunk:match(".* of (.*)") or chunk
                 names = names:gsub("^[%s,]+", ""):gsub("^and ", ""):gsub(" spells?$", ""):gsub(" abilit%a+$", "")
-                local a = tonumber((amt:gsub("%.$", "")))
+                local a = Pct(amt)
                 if a and a > 0 then
                     for _, n in ipairs(SplitNames(names)) do
-                        AddMod(isDur and dur or cast, n, a, src)
+                        AddMod(isDur and mods.dur or mods.cast, n, a, src)
                         found = true
                     end
                 end
@@ -328,6 +376,25 @@ function ns.ParseTalentText(text, cast, dur, src, heal)
     end
     return found
 end
+
+-- Sum of a talent effect that applies to a spell: its own name plus matching categories.
+local function Applicable(tbl, def, isInstant, school, categoriesOnly)
+    local total, srcs, schoolWide = 0, {}, 0
+    local function take(key, isSchool)
+        local m = tbl and tbl[key]
+        if not m then return end
+        total = total + m.amount
+        if isSchool then schoolWide = schoolWide + m.amount end
+        for _, sname in ipairs(m.sources) do srcs[#srcs + 1] = sname end
+    end
+    take(def.lname)
+    take("*")
+    if isInstant then take("@instant") end
+    if school == 2 then take("@holy", true) end
+    if school == 4 then take("@nature", true) end
+    return total, table.concat(srcs, ", "), schoolWide
+end
+ns.Applicable = Applicable
 
 local function TalentText(tab, i)
     scanTip:SetOwner(WorldFrame, "ANCHOR_NONE")
@@ -359,7 +426,7 @@ local function TalentSig()
 end
 
 function HRA:GetTalentMods()
-    local mods = { cast = {}, dur = {}, heal = {} }
+    local mods = { cast = {}, dur = {}, heal = {}, cost = {}, crit = {} }
     pcall(function()
         for tab = 1, (GetNumTalentTabs() or 0) do
             for i = 1, (GetNumTalents(tab) or 0) do
@@ -367,13 +434,15 @@ function HRA:GetTalentMods()
                 if name and rank and rank > 0 then
                     local src  = ("%s %d"):format(name, rank)
                     local text = TalentText(tab, i)
-                    local found = text ~= "" and ns.ParseTalentText(text, mods.cast, mods.dur, src, mods.heal)
+                    local found = text ~= "" and ns.ParseTalentText(text, mods, src)
                     local fb = ns.TALENT_FALLBACK[name]
                     if not found and fb then
                         local mult = fb.perRank and rank or 1
                         for sp, v in pairs(fb.cast or {}) do AddMod(mods.cast, sp, v * mult, src .. "*") end
                         for sp, v in pairs(fb.dur  or {}) do AddMod(mods.dur,  sp, v * mult, src .. "*") end
                         for sp, v in pairs(fb.heal or {}) do AddMod(mods.heal, sp, v * mult, src .. "*") end
+                        for sp, v in pairs(fb.cost or {}) do AddMod(mods.cost, sp, v * mult, src .. "*") end
+                        for sp, v in pairs(fb.crit or {}) do AddMod(mods.crit, sp, v * mult, src .. "*") end
                     end
                 end
             end
@@ -395,6 +464,8 @@ for _, defs in pairs(ns.SPELLS) do
 end
 
 local autoDefs = {}
+ns.TRACK_IDS = {}       -- every heal rank the table knows about (for mana-cost checks)
+HRA.costPct = {}        -- [spellID] = mana cost reduction % from talents (last refresh)
 
 function HRA:BuildEntries()
     local class = select(2, UnitClass("player"))
@@ -406,6 +477,7 @@ function HRA:BuildEntries()
     local function add(e)
         if seen[e.id] then return end
         seen[e.id] = true
+        ns.TRACK_IDS[e.id] = true
         entries[#entries + 1] = e
     end
 
@@ -472,15 +544,6 @@ function ns.DownrankShare(playerLevel, learnLevel)
     if not playerLevel or not learnLevel or learnLevel <= 0 then return 1 end
     return Clamp(1 - (playerLevel - ns.DOWNRANK_GRACE - learnLevel) * ns.DOWNRANK_PER_LVL, 0, 1)
 end
--- Healing % from talents that applies to this spell (used only for estimates;
--- tooltip values and measured coefficients already include it).
-local function HealMult(mods, def, isInstant)
-    local h = mods.heal or {}
-    local pct = (h[def.lname] and h[def.lname].amount or 0) + (h["*"] and h["*"].amount or 0)
-    if isInstant and h["@instant"] then pct = pct + h["@instant"].amount end
-    return 1 + pct / 100
-end
-
 -- Remembers each rank's tooltip value at the lowest and highest +healing seen
 -- (same level and talents). Once they are 20+ apart, the slope is the rank's
 -- true +healing coefficient including talents and the downranking penalty.
@@ -591,14 +654,41 @@ function HRA:ComputeEntry(e, mods, sig, bonus, critPct, playerLevel)
         ch = ch * ttDur / def.baseDur
     end
 
+    -- ---- Talent effects that apply to this spell ----
+    local ctx       = self.ctx or {}
+    local school    = ctx.school or 2
+    local isInstant = castNow <= 0 and not def.channel
+    local healPct, healSrc = Applicable(mods.heal, def, isInstant, school)
+    local costPct, costSrc = Applicable(mods.cost, def, isInstant, school)
+    local critTal, critSrc, critSchoolWide = Applicable(mods.crit, def, isInstant, school)
+    local M = 1 + healPct / 100
+
     -- ---- +Healing ----
     -- WoW Forever's tooltips already include your +healing, the downranking penalty
     -- and healing talents (verified in game), so the tooltip value is used as-is.
     -- The addon only works out the +healing portion, to show it or remove it.
-    local share  = ns.DownrankShare(playerLevel, e.level)
-    local mult   = HealMult(mods, def, castNow <= 0 and not def.channel)
-    local estD, estH = cd * share * mult, ch * share * mult     -- per point of +healing
+    local formulaShare = ns.DownrankShare(playerLevel, e.level)
+    local share = formulaShare
     local slope, sLo, sHi = self:LearnSlope(e.id, playerLevel, sig, bonus, direct + hot)
+
+    -- Is the talent healing % already in the tooltip? Assumed yes (verified in game for
+    -- Improved Renew). Confirmed per spell once a rank that keeps its full +healing has
+    -- a measured coefficient: slope / base coefficient equals the multiplier in the tooltip.
+    DB.healMode = DB.healMode or {}
+    local healIncluded, healVerified = true, false
+    local hm = DB.healMode[def.lname]
+    if hm and hm.sig == sig then healIncluded, healVerified = (hm.mode == "included"), true end
+    if slope and M > 1.005 and formulaShare >= 0.999 and (cd + ch) > 0 and math.abs(slope) >= 0.02 then
+        local ratio = slope / (cd + ch)
+        healIncluded = math.abs(ratio - M) <= math.abs(ratio - 1)
+        healVerified = true
+        DB.healMode[def.lname] = { mode = healIncluded and "included" or "missing", sig = sig }
+    end
+    if M <= 1.005 then healIncluded, healVerified = true, false end
+    local mult      = healIncluded and M or 1     -- healing % already inside the tooltip
+    local extraMult = healIncluded and 1 or M     -- healing % the addon has to apply
+
+    local estD, estH = cd * share * mult, ch * share * mult     -- per point of +healing
     local perD, perH = estD, estH
     local includes, measured = true, false
     local fullCoef = (cd + ch) * mult
@@ -623,11 +713,20 @@ function HRA:ComputeEntry(e, mods, sig, bonus, critPct, playerLevel)
     local hotBase    = includes and math.max(hot - bH, 0) or hot
 
     -- ---- Crit (direct portion only) ----
+    -- School-wide crit talents ("your Holy spells") may already be in the client's
+    -- school crit: compare it with your lowest other-school crit to find out.
+    -- Spell-specific ones ("your Regrowth spell", "instant cast spells") never are.
+    local schoolInClient = false
+    if critSchoolWide > 0 and ctx.critRef then
+        schoolInClient = (critPct - ctx.critRef) >= critSchoolWide - 0.3
+    end
+    local critAdd   = critTal - (schoolInClient and critSchoolWide or 0)
+    local critTotal = Clamp(critPct + critAdd, 0, 100)
     local critMult = 1
-    if DB.crit and direct > 0 then critMult = 1 + (critPct / 100) * 0.5 end
+    if DB.crit and direct > 0 then critMult = 1 + (critTotal / 100) * 0.5 end
 
-    local directAvg = (directBase + (DB.bonus and bD or 0)) * critMult
-    local hotAvg    = (hotBase + (DB.bonus and bH or 0)) * durScale
+    local directAvg = (directBase + (DB.bonus and bD or 0)) * extraMult * critMult
+    local hotAvg    = (hotBase + (DB.bonus and bH or 0)) * durScale * extraMult
     hot = hot * durScale
     local perTarget = directAvg + hotAvg
     local total     = perTarget * factor
@@ -643,20 +742,38 @@ function HRA:ComputeEntry(e, mods, sig, bonus, critPct, playerLevel)
         end
     end
 
-    local mana = ManaCost(e.id)
+    -- ---- Mana cost ----
+    -- The client's cost is assumed to include cost talents. Casting the spell once
+    -- verifies it: the mana actually spent is compared with the client's number.
+    local clientCost = ManaCost(e.id)
+    HRA.costPct[e.id] = costPct
+    DB.costObs = DB.costObs or {}
+    local mana, costState = clientCost, (costPct > 0) and "assumed" or "none"
+    local ob = DB.costObs[e.id]
+    if ob and ob.sig == sig and ob.client == clientCost then
+        mana, costState = ob.cost, "observed"
+    elseif costPct > 0 and DB.costMode == "apply" then
+        mana, costState = clientCost * (1 - math.min(costPct, 100) / 100), "applied"
+    elseif costPct > 0 and DB.costMode == "client" then
+        costState = "verified"
+    end
 
     row.castNow, row.cast = castNow, cast
     row.channel, row.totem = def.channel, def.totem
     row.ttDur, row.effDur, row.durSrc = ttDur, (hot > 0) and effDur or nil, durSrc
     row.direct, row.hot, row.bD, row.bH = direct, hot, bD, bH
     row.cd, row.ch, row.mult = cd, ch, mult
+    row.healPct, row.healSrc, row.healIncluded, row.healVerified, row.extraMult = healPct, healSrc, healIncluded, healVerified, extraMult
+    row.costPct, row.costSrc, row.clientCost, row.costState = costPct, costSrc, clientCost, costState
+    row.critTal, row.critSrc, row.critSchoolWide, row.schoolInClient = critTal, critSrc, critSchoolWide, schoolInClient
+    row.critAdd, row.critClient, row.critTotal = critAdd, critPct, critTotal
     row.bonusShare, row.shareMeasured = share, measured
     row.slope, row.slopeLo, row.slopeHi = slope, sLo, sHi
     row.tooltipHasBonus = includes
-    row.bonusAmt = (bD + bH * durScale)
+    row.bonusAmt = (bD + bH * durScale) * extraMult
     row.spellHealing = bonus
     row.playerLevel = playerLevel
-    row.critMult, row.critPct = critMult, critPct
+    row.critMult, row.critPct = critMult, critTotal
     row.tf, row.factor = tf, factor
     row.time, row.mana, row.total = time, mana, total
     row.directAvg, row.hotAvg = directAvg, hotAvg
@@ -674,6 +791,17 @@ function HRA:ComputeRows()
     local bonus = GetSpellBonusHealing and GetSpellBonusHealing() or 0
     local school = ns.CLASS_SCHOOL[class] or 2
     local critPct = GetSpellCritChance and GetSpellCritChance(school) or 0
+    -- Lowest crit among your other spell schools = crit without school-specific talents
+    local critRef
+    if GetSpellCritChance then
+        for sch = 2, 7 do
+            if sch ~= school then
+                local c = GetSpellCritChance(sch)
+                if c and (not critRef or c < critRef) then critRef = c end
+            end
+        end
+    end
+    self.ctx = { school = school, critRef = critRef }
 
     local rows = {}
     for _, e in ipairs(entries) do
@@ -811,8 +939,31 @@ local function RowOnEnter(self)
             end
         end
     end
-    if DB.crit and r.critMult > 1 then
-        GT:AddDoubleLine("Crit:", ("%.1f%%  (x%.3f on direct part)"):format(r.critPct, r.critMult), 0.8, 0.8, 0.8, 1, 1, 1)
+    if DB.crit and r.direct > 0 then
+        GT:AddDoubleLine("Crit:", ("%.1f%%  (x%.3f on direct part)"):format(r.critTotal, r.critMult), 0.8, 0.8, 0.8, 1, 1, 1)
+        if r.critTal > 0 then
+            GT:AddLine(("  %.1f%% from character sheet + %s%% talents (%s)"):format(r.critClient, FmtSec(r.critAdd), r.critSrc), 0.6, 0.6, 0.6, true)
+            if r.critSchoolWide > 0 then
+                GT:AddLine(r.schoolInClient and "  school-wide crit talents already on character sheet"
+                    or "  school-wide crit talents added by addon", 0.6, 0.6, 0.6)
+            end
+        end
+    end
+
+    -- Talent healing % and mana cost
+    if r.healPct > 0 then
+        local state = not r.healIncluded and "applied by addon (not in tooltip)"
+            or (r.healVerified and "in tooltip (verified)" or "assumed in tooltip")
+        GT:AddDoubleLine("Talent healing:", ("+%s%%  %s"):format(FmtSec(r.healPct), state), 0.8, 0.8, 0.8,
+            1, r.healIncluded and 1 or 0.9, r.healIncluded and 1 or 0.3)
+        GT:AddLine("  " .. r.healSrc, 0.6, 0.6, 0.6, true)
+    end
+    if r.costPct > 0 then
+        local state = ({ assumed = "assumed in game's cost (cast once to verify)",
+                         verified = "in game's cost (verified)", observed = "verified by your last cast",
+                         applied = ("applied by addon to game's %d"):format(r.clientCost) })[r.costState] or ""
+        GT:AddDoubleLine("Talent mana cost:", ("-%s%%"):format(FmtSec(r.costPct)), 0.8, 0.8, 0.8, 1, 1, 1)
+        GT:AddLine(("  %s  (%s)"):format(state, r.costSrc), 0.6, 0.6, 0.6, true)
     end
     if r.tf > 1 then
         GT:AddDoubleLine("Targets:", DB.group and ("x%s (group heals on)"):format(FmtSec(r.tf)) or "1 (group heals off)", 0.8, 0.8, 0.8, 1, 1, 1)
@@ -992,9 +1143,9 @@ local function MakeFrame()
     f.legend:SetPoint("TOPRIGHT", f, "BOTTOMRIGHT", -24, 78)
     f.legend:SetJustifyH("LEFT")
     f.legend:SetTextColor(C.legend[1], C.legend[2], C.legend[3])
-    f.legend:SetText("Cast / HoT colour:  |cffe6d6aenormal|r = from game client,  "
+    f.legend:SetText("Cast / HoT / Mana colour:  |cffe6d6aenormal|r = from game client,  "
         .. "|cffffe64dyellow|r = talent applied by addon,  "
-        .. "|cff66ff66green|r = duration observed on your own aura.   Bonus: ~ = estimated, no ~ = measured.   Hover a row for details.")
+        .. "|cff66ff66green|r = confirmed by your own cast.   Bonus: ~ = estimated.   Hover a row for talent details.")
 
     -- Options
     local x = SCROLL_LEFT
@@ -1132,7 +1283,8 @@ function HRA:Refresh()
 
             local durCol = (r.durSrc == "observed" and COLOR.green) or (r.durSrc == "talent" and COLOR.yellow) or nil
             set("dur", (r.effDur and not r.channel) and (FmtSec(r.effDur) .. "s") or "-", durCol)
-            set("mana", FmtInt(r.mana))
+            local manaCol = (r.costState == "applied" and COLOR.yellow) or (r.costState == "observed" and COLOR.green) or nil
+            set("mana", FmtInt(r.mana), manaCol)
             set("heal", FmtInt(r.total))
             set("hps", r.hps and ("%.1f"):format(r.hps) or "-", { Grad(r.hps, hpsLo, hpsHi) })
             set("hpm", r.hpm and ("%.2f"):format(r.hpm) or "-", { Grad(r.hpm, hpmLo, hpmHi) })
@@ -1185,6 +1337,67 @@ end
 -- HoT DURATION LEARNING
 -- After you cast a HoT, read the real duration off the aura you applied.
 -- ============================================================
+-- ============================================================
+-- MANA COST VERIFICATION
+-- The mana actually spent on a cast is compared with the client's cost. If it
+-- matches, the client already includes cost talents; if it matches the client
+-- cost minus the talent %, the addon applies the talent itself from then on.
+-- Casts that match neither (Inner Focus, Clearcasting, a regen tick landing at
+-- the same moment) are ignored.
+-- ============================================================
+local manaTrack = { last = nil, lastDrop = nil, pending = nil }
+
+local function ResolveCost(spellID, spent)
+    if not spent or spent <= 0 then return end
+    local client = ManaCost(spellID)
+    if client <= 0 then return end
+    if HRA.costPct[spellID] == nil then pcall(HRA.ComputeRows, HRA) end
+    local pct = HRA.costPct[spellID] or 0
+    local tol = math.max(1, client * 0.015)
+    local mode
+    if math.abs(spent - client) <= tol then
+        mode = "client"
+    elseif pct > 0 and math.abs(spent - client * (1 - pct / 100)) <= tol + 1 then
+        mode = "apply"
+    else
+        return
+    end
+    DB.costObs[spellID] = { cost = spent, client = client, sig = TalentSig() }
+    if pct > 0 and DB.costMode ~= mode then
+        DB.costMode = mode
+        print(("|cff00ff96HealRankAdvisor:|r mana cost talents are %s."):format(
+            mode == "client" and "already included in the game's spell costs"
+            or "NOT included in the game's spell costs; the addon now applies them"))
+    end
+    HRA:RequestRefresh()
+end
+
+local function OnManaChanged()
+    local cur = UnitPower("player", 0)
+    local now = GetTime()
+    if manaTrack.last and cur < manaTrack.last then
+        local drop = manaTrack.last - cur
+        if manaTrack.pending and now - manaTrack.pending.t <= 0.35 then
+            ResolveCost(manaTrack.pending.id, drop)
+            manaTrack.pending = nil
+        else
+            manaTrack.lastDrop = { amount = drop, t = now }
+        end
+    end
+    manaTrack.last = cur
+end
+
+local function OnHealCast(spellID)
+    local now = GetTime()
+    local d = manaTrack.lastDrop
+    if d and now - d.t <= 0.35 then
+        ResolveCost(spellID, d.amount)
+        manaTrack.lastDrop = nil
+    else
+        manaTrack.pending = { id = spellID, t = now }
+    end
+end
+
 local function ObserveHot(spellID, castAt)
     local units = { "target", "player", "focus", "mouseover", "party1", "party2", "party3", "party4" }
     if IsInRaid and IsInRaid() then for i = 1, 40 do units[#units + 1] = "raid" .. i end end
@@ -1226,7 +1439,7 @@ SlashCmdList["HEALRANKADVISOR"] = function(msg)
         print("  /hra            Toggle the table")
         print("  /hra talents    Show talents detected as changing cast time / HoT duration")
         print("  /hra debug      Print the parsed values for every row")
-        print("  /hra resetobs   Forget learned HoT durations")
+        print("  /hra resetobs   Forget learned HoT durations, mana costs and measurements")
         return
     elseif msg == "talents" then
         local mods = HRA:GetTalentMods()
@@ -1234,6 +1447,12 @@ SlashCmdList["HEALRANKADVISOR"] = function(msg)
         print("|cff00ff96HealRankAdvisor|r talent effects found:")
         for sp, m in pairs(mods.cast) do any = true; print(("  %s: cast time -%ss  (%s)"):format(sp, FmtSec(m.amount), table.concat(m.sources, ", "))) end
         for sp, m in pairs(mods.dur)  do any = true; print(("  %s: duration +%ss  (%s)"):format(sp, FmtSec(m.amount), table.concat(m.sources, ", "))) end
+        local CAT = { ["*"] = "all heals", ["@instant"] = "instant spells", ["@holy"] = "Holy spells", ["@nature"] = "Nature spells" }
+        for sp, m in pairs(mods.heal) do any = true; print(("  %s: healing +%s%%  (%s)"):format(CAT[sp] or sp, FmtSec(m.amount), table.concat(m.sources, ", "))) end
+        for sp, m in pairs(mods.cost) do any = true; print(("  %s: mana cost -%s%%  (%s)"):format(CAT[sp] or sp, FmtSec(m.amount), table.concat(m.sources, ", "))) end
+        for sp, m in pairs(mods.crit) do any = true; print(("  %s: crit +%s%%  (%s)"):format(CAT[sp] or sp, FmtSec(m.amount), table.concat(m.sources, ", "))) end
+        print(("  mana cost talents in game's costs: %s"):format(
+            DB.costMode == "client" and "yes (verified)" or DB.costMode == "apply" and "no (addon applies them)" or "assumed yes (cast a heal to verify)"))
         if not any then print("  none") end
         print("  (* = read from the addon's fallback table instead of the talent tooltip)")
         return
@@ -1252,7 +1471,8 @@ SlashCmdList["HEALRANKADVISOR"] = function(msg)
         return
     elseif msg == "resetobs" then
         wipe(DB.observed)
-        print("|cff00ff96HealRankAdvisor:|r learned HoT durations cleared.")
+        DB.costObs, DB.costMode, DB.healMode, DB.samples = {}, nil, {}, {}
+        print("|cff00ff96HealRankAdvisor:|r learned durations, mana costs and measurements cleared.")
         HRA:RequestRefresh(0)
         return
     elseif msg == "refresh" then
@@ -1293,6 +1513,8 @@ ev:SetScript("OnEvent", function(self, event, ...)
         end
         Reg("UNIT_STATS", "player")
         Reg("UNIT_SPELLCAST_SUCCEEDED", "player")
+        Reg("UNIT_POWER_FREQUENT", "player")
+        manaTrack.last = UnitPower("player", 0)
         -- Discover auto-detected HoTs in the background so their durations can be learned
         C_Timer.After(3, function() pcall(HRA.BuildEntries, HRA) end)
         print(("|cff00ff96HealRankAdvisor %s|r loaded  —  /hra to open, /hra help for options"):format(VERSION))
@@ -1303,6 +1525,11 @@ ev:SetScript("OnEvent", function(self, event, ...)
             local castAt = GetTime()
             C_Timer.After(0.3, function() ObserveHot(spellID, castAt) end)
         end
+        if unit == "player" and spellID and ns.TRACK_IDS[spellID] then OnHealCast(spellID) end
+
+    elseif event == "UNIT_POWER_FREQUENT" then
+        local unit, ptype = ...
+        if unit == "player" and (ptype == "MANA" or ptype == nil) then OnManaChanged() end
 
     elseif event == "SPELL_DATA_LOAD_RESULT" then
         HRA:RequestRefresh(0.5)
