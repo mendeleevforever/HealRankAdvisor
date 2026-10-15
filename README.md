@@ -18,15 +18,28 @@ Copy the `HealRankAdvisor/` folder into your WoW Forever `Interface/AddOns/` dir
 
 ## The table
 
-Columns: Spell, Rank, level learned, Cast time, HoT duration, Mana, Average heal, HPS, HPM. HPS and HPM are colour-graded red → yellow → green across your trained ranks. Click the Spell, Mana, Avg Heal, HPS or HPM header to sort. Hover any row for a full breakdown including the spell's tooltip text.
+Columns: Spell, Rank, level learned, Bonus (share of your +healing the rank keeps; ~ = estimated), Cast time, HoT duration, Mana, Average heal, HPS, HPM. HPS and HPM are colour-graded red → yellow → green across your trained ranks. Click the Spell, Mana, Avg Heal, HPS or HPM header to sort. Hover any row for a full breakdown including the spell's tooltip text.
 
 Options along the bottom:
 
-- **+Healing** — adds your bonus healing using standard vanilla coefficients (cast time / 3.5, HoT duration / 15, and the below-level-20 penalty).
+- **+Healing** — on by default (tooltips already include it). Untick to see each rank's base heal with your spell healing removed.
 - **Crit** — includes the average value of crits on the direct part of heals.
 - **Group heals** — multiplies Prayer of Healing, Holy Nova, Tranquility, Chain Heal (1 + 0.5 + 0.25), etc. by the targets they hit.
 - **Untrained ranks** — also lists ranks your level allows but you haven't trained yet (in grey).
 - **HoT HPS by duration** — HoT HPS = heal / HoT duration (healing per second on the target) instead of heal / time spent casting (1.5 s GCD for instants).
+
+## How +healing is handled
+
+WoW Forever's spell tooltips **already include** your spell healing, the downranking penalty and healing talents like Improved Renew. This was verified in game on a level 30 priest at 16 and 151 spell healing. The addon therefore uses each rank's tooltip value as-is for Avg Heal, HPS and HPM.
+
+It still works out the +healing portion of each heal, to show it in the **Bonus** column and to remove it when the **+Healing** box is unticked:
+
+- **Measured (no ~).** The addon remembers every rank's tooltip at the lowest and highest spell healing it has seen at your current level and talents. Once those are 20+ apart (swap a healing item on and off once), the change in heal ÷ change in spell healing is the rank's exact coefficient.
+- **Estimated (~).** Until then it uses the vanilla coefficient (cast time / 3.5, HoT duration / 15) × talent healing % × WoW Forever's downranking share `1 - (L - 17 - T) x 0.05` (clamped 0-100%, L = your level, T = the rank's learn level).
+
+The original game's below-level-20 penalty is not used. It does not exist in WoW Forever: Heal rank 1 (learned at 16) and Renew rank 2 (learned at 14) keep their full coefficient. The downranking formula matched the in-game tooltips for 9 of 10 ranks tested. Lesser Heal rank 1 kept about 24% where the formula predicts 40%, which is why measured values take priority.
+
+If the tooltip doesn't change at all with spell healing, the addon concludes that tooltip excludes +healing and adds the estimate itself.
 
 ## How talents are handled
 
@@ -50,7 +63,7 @@ New WoW Forever talents worded in the usual "Reduces the cast time of your X spe
 
 ## Known limitations
 
-- +Healing coefficients are vanilla values. WoW Forever may have adjusted them, and talents that add flat healing percentages (e.g. Spiritual Healing) are only included if the game's tooltip already includes them.
+- Estimated +healing shares use vanilla coefficients until the addon has measured a rank. This only affects the Bonus column and the +Healing-off view, not Avg Heal/HPS/HPM.
 - Crit uses your school crit chance. Spell-specific crit talents (e.g. Improved Regrowth) and mana-on-crit effects (Illumination) aren't modelled.
 - Tooltip parsing assumes an English client.
 
