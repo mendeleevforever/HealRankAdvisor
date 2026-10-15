@@ -7,7 +7,7 @@ local HRA = {}
 _G.HealRankAdvisor = HRA
 ns.HRA = HRA
 
-local VERSION = "1.0.0"
+local VERSION = "1.1.0"
 local GCD     = 1.5
 local DB
 
@@ -588,11 +588,27 @@ end
 -- ============================================================
 local MainFrame
 local ROWS = {}
-local LH = 16
-local FRAME_W, FRAME_H = 680, 520
+local LH = 18
+local FRAME_W, FRAME_H = 720, 540
+local SCROLL_LEFT = 20          -- scroll area inset from the window's left edge
+local CHILD_W = FRAME_W - SCROLL_LEFT - 40
+
+-- Palette (r, g, b) — shared with Waylaid Crate Advisor
+local C = {
+    bg        = { 0.118, 0.082, 0.051 },
+    gold      = { 0.541, 0.416, 0.173 },
+    goldLight = { 0.722, 0.569, 0.235 },
+    outline   = { 0.169, 0.118, 0.055 },
+    inner     = { 0.290, 0.212, 0.094 },
+    rule      = { 0.420, 0.314, 0.137 },
+    header    = { 0.831, 0.627, 0.090 },
+    text      = { 0.902, 0.839, 0.682 },
+    muted     = { 0.612, 0.553, 0.439 },
+    legend    = { 0.720, 0.650, 0.520 },
+}
 
 local COLS = {
-    { key = "name",  label = "Spell",    w = 168, justify = "LEFT",   sort = "spell" },
+    { key = "name",  label = "Spell",    w = 190, justify = "LEFT",   sort = "spell" },
     { key = "rank",  label = "Rank",     w = 36,  justify = "CENTER" },
     { key = "level", label = "Lvl",      w = 30,  justify = "CENTER" },
     { key = "cast",  label = "Cast",     w = 54,  justify = "RIGHT" },
@@ -609,8 +625,8 @@ end
 
 local COLOR = {
     gold   = { 1.00, 0.82, 0.00 },
-    white  = { 1.00, 1.00, 1.00 },
-    grey   = { 0.55, 0.55, 0.55 },
+    white  = C.text,
+    grey   = C.muted,
     yellow = { 1.00, 0.90, 0.30 },
     green  = { 0.40, 1.00, 0.40 },
 }
@@ -695,13 +711,13 @@ local function GetRow(i)
     r.bg = r:CreateTexture(nil, "BACKGROUND")
     r.bg:SetAllPoints()
     r.sep = r:CreateTexture(nil, "ARTWORK")
-    r.sep:SetColorTexture(0.55, 0.40, 0.12, 0.6)
+    r.sep:SetColorTexture(C.gold[1], C.gold[2], C.gold[3], 0.55)
     r.sep:SetHeight(1)
-    r.sep:SetPoint("BOTTOMLEFT", r, "TOPLEFT", 0, 1)
-    r.sep:SetPoint("BOTTOMRIGHT", r, "TOPRIGHT", 0, 1)
+    r.sep:SetPoint("BOTTOMLEFT", r, "TOPLEFT", 0, 2)
+    r.sep:SetPoint("BOTTOMRIGHT", r, "TOPRIGHT", 0, 2)
     local hl = r:CreateTexture(nil, "HIGHLIGHT")
     hl:SetAllPoints()
-    hl:SetColorTexture(1, 0.85, 0.4, 0.15)
+    hl:SetColorTexture(C.goldLight[1], C.goldLight[2], C.goldLight[3], 0.18)
     r.cells = {}
     for _, col in ipairs(COLS) do
         local fs = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
@@ -725,9 +741,32 @@ local OPTION_TIPS = {
     hotByDuration = "HoT HPS = total heal / HoT duration (healing per second on the target) instead of total heal / time spent casting.",
 }
 
+-- Draws a rectangular border of the given thickness, `inset` px inside the frame edge
+-- (negative inset draws outside it).
+local function AddBorder(frame, layer, rgb, alpha, thickness, inset)
+    local function edge()
+        local t = frame:CreateTexture(nil, layer)
+        t:SetColorTexture(rgb[1], rgb[2], rgb[3], alpha)
+        return t
+    end
+    local top, bottom, left, right = edge(), edge(), edge(), edge()
+    top:SetPoint("TOPLEFT", inset, -inset)
+    top:SetPoint("TOPRIGHT", -inset, -inset)
+    top:SetHeight(thickness)
+    bottom:SetPoint("BOTTOMLEFT", inset, inset)
+    bottom:SetPoint("BOTTOMRIGHT", -inset, inset)
+    bottom:SetHeight(thickness)
+    left:SetPoint("TOPLEFT", inset, -inset)
+    left:SetPoint("BOTTOMLEFT", inset, inset)
+    left:SetWidth(thickness)
+    right:SetPoint("TOPRIGHT", -inset, -inset)
+    right:SetPoint("BOTTOMRIGHT", -inset, inset)
+    right:SetWidth(thickness)
+end
+
 local function MakeFrame()
     if MainFrame then return MainFrame end
-    local f = CreateFrame("Frame", "HRAMainFrame", UIParent, BackdropTemplateMixin and "BackdropTemplate" or nil)
+    local f = CreateFrame("Frame", "HRAMainFrame", UIParent)
     f:SetSize(FRAME_W, FRAME_H)
     f:SetPoint("CENTER")
     f:SetFrameStrata("DIALOG")
@@ -737,48 +776,54 @@ local function MakeFrame()
     f:RegisterForDrag("LeftButton")
     f:SetScript("OnDragStart", f.StartMoving)
     f:SetScript("OnDragStop", f.StopMovingOrSizing)
-    tinsert(UISpecialFrames, "HRAMainFrame")
+    f:Hide()
+    tinsert(UISpecialFrames, "HRAMainFrame")   -- Escape closes the window
 
-    if f.SetBackdrop then
-        f:SetBackdrop({
-            bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
-            edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
-            tile = true, tileSize = 32, edgeSize = 32,
-            insets = { left = 11, right = 12, top = 12, bottom = 11 },
-        })
-        f:SetBackdropColor(1, 0.88, 0.65, 1)
-    else
-        local bg = f:CreateTexture(nil, "BACKGROUND")
-        bg:SetTexture("Interface\\DialogFrame\\UI-DialogBox-Background")
-        bg:SetPoint("TOPLEFT", 12, -12)
-        bg:SetPoint("BOTTOMRIGHT", -12, 12)
-        bg:SetVertexColor(1, 0.88, 0.65, 1)
-    end
+    -- Solid background (opaque, so the world doesn't show through)
+    local bg = f:CreateTexture(nil, "BACKGROUND")
+    bg:SetColorTexture(C.bg[1], C.bg[2], C.bg[3], 0.97)
+    bg:SetAllPoints()
 
-    local titleBg = f:CreateTexture(nil, "ARTWORK")
-    titleBg:SetTexture("Interface\\DialogFrame\\UI-DialogBox-Header")
-    titleBg:SetPoint("TOP", 0, 12)
-    titleBg:SetSize(360, 64)
-    local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    title:SetPoint("TOP", 0, -2)
+    -- Layered trim: dark outline, gold band, faint inner line
+    AddBorder(f, "BORDER",  C.outline, 1, 2, -2)
+    AddBorder(f, "BORDER",  C.gold,    1, 3,  0)
+    AddBorder(f, "ARTWORK", C.inner,   1, 1,  3)
+
+    -- Title plate overlapping the top edge
+    local plate = CreateFrame("Frame", nil, f)
+    plate:SetSize(300, 34)
+    plate:SetPoint("TOP", 0, 18)
+    plate:SetFrameLevel(f:GetFrameLevel() + 5)
+    local pbg = plate:CreateTexture(nil, "BACKGROUND")
+    pbg:SetColorTexture(0.165, 0.114, 0.063, 1)
+    pbg:SetAllPoints()
+    AddBorder(plate, "BORDER", C.outline,   1, 2, -2)
+    AddBorder(plate, "BORDER", C.goldLight, 1, 2,  0)
+    local title = plate:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    title:SetPoint("CENTER", 0, 0)
     title:SetText("Heal Rank Advisor")
+    title:SetTextColor(1, 0.82, 0)
 
     local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
-    close:SetPoint("TOPRIGHT", -5, -5)
+    close:SetPoint("TOPRIGHT", -4, -4)
+    close:SetScript("OnClick", function() f:Hide() end)
 
-    f.info = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    f.info:SetPoint("TOP", 0, -30)
+    -- Character summary line under the title plate
+    f.info = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    f.info:SetPoint("TOP", 0, -26)
+    f.info:SetTextColor(C.legend[1], C.legend[2], C.legend[3])
 
-    -- Column headers (click to sort)
-    local HX, HY = 16, -50
+    -- Fixed column headers (click to sort; they don't scroll away)
+    local headerY = -48
     f.headers = {}
     for _, col in ipairs(COLS) do
         local b = CreateFrame("Button", nil, f)
-        b:SetPoint("TOPLEFT", f, "TOPLEFT", HX + col.x, HY)
+        b:SetPoint("TOPLEFT", f, "TOPLEFT", SCROLL_LEFT + col.x, headerY)
         b:SetSize(col.w, 16)
-        local fs = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        local fs = b:CreateFontString(nil, "OVERLAY", "GameFontNormal")
         fs:SetAllPoints()
         fs:SetJustifyH(col.justify)
+        if fs.SetWordWrap then fs:SetWordWrap(false) end
         b.fs = fs
         b.col = col
         if col.sort then
@@ -792,33 +837,44 @@ local function MakeFrame()
         end
         f.headers[#f.headers + 1] = b
     end
-    local div = f:CreateTexture(nil, "ARTWORK")
-    div:SetColorTexture(0.55, 0.40, 0.12, 0.8)
-    div:SetPoint("TOPLEFT", 16, HY - 17)
-    div:SetPoint("TOPRIGHT", -36, HY - 17)
-    div:SetHeight(1)
+    local headRule = f:CreateTexture(nil, "ARTWORK")
+    headRule:SetColorTexture(C.rule[1], C.rule[2], C.rule[3], 1)
+    headRule:SetPoint("TOPLEFT", SCROLL_LEFT, headerY - 18)
+    headRule:SetPoint("TOPRIGHT", -20, headerY - 18)
+    headRule:SetHeight(1)
 
+    -- Scrolling body; right inset leaves room for the scrollbar inside the trim
     local scroll = CreateFrame("ScrollFrame", "HRAScrollFrame", f, "UIPanelScrollFrameTemplate")
-    scroll:SetPoint("TOPLEFT", HX, HY - 20)
-    scroll:SetPoint("BOTTOMRIGHT", -36, 64)
+    scroll:SetPoint("TOPLEFT", SCROLL_LEFT, headerY - 22)
+    scroll:SetPoint("BOTTOMRIGHT", -40, 92)
     local child = CreateFrame("Frame", nil, scroll)
-    child:SetSize(FRAME_W - HX - 36, 10)
+    child:SetSize(CHILD_W, 10)
     scroll:SetScrollChild(child)
     f.scroll, f.child = scroll, child
 
     f.empty = child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     f.empty:SetPoint("TOP", 0, -40)
-    f.empty:SetWidth(FRAME_W - 100)
+    f.empty:SetWidth(CHILD_W - 40)
+    f.empty:SetTextColor(C.muted[1], C.muted[2], C.muted[3])
 
-    f.legend = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    f.legend:SetPoint("BOTTOMLEFT", 20, 44)
-    f.legend:SetPoint("BOTTOMRIGHT", -20, 44)
+    -- Footer: rule, legend, options, Refresh button
+    local footRule = f:CreateTexture(nil, "ARTWORK")
+    footRule:SetColorTexture(C.rule[1], C.rule[2], C.rule[3], 1)
+    footRule:SetPoint("BOTTOMLEFT", SCROLL_LEFT, 84)
+    footRule:SetPoint("BOTTOMRIGHT", -20, 84)
+    footRule:SetHeight(1)
+
+    f.legend = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    f.legend:SetPoint("TOPLEFT", f, "BOTTOMLEFT", SCROLL_LEFT + 4, 78)
+    f.legend:SetPoint("TOPRIGHT", f, "BOTTOMRIGHT", -24, 78)
     f.legend:SetJustifyH("LEFT")
-    f.legend:SetText("HoT/Cast colour: |cffffffffwhite|r = from game client, |cffffe64dyellow|r = talent applied by addon, "
-        .. "|cff66ff66green|r = duration observed on your own aura.  Hover a row for the full breakdown.")
+    f.legend:SetTextColor(C.legend[1], C.legend[2], C.legend[3])
+    f.legend:SetText("Cast / HoT colour:  |cffe6d6aenormal|r = from game client,  "
+        .. "|cffffe64dyellow|r = talent applied by addon,  "
+        .. "|cff66ff66green|r = duration observed on your own aura.   Hover a row for the full breakdown.")
 
     -- Options
-    local x = 18
+    local x = SCROLL_LEFT
     local opts = {
         { "bonus", "+Healing" }, { "crit", "Crit" }, { "group", "Group heals" },
         { "untrained", "Untrained ranks" }, { "hotByDuration", "HoT HPS by duration" },
@@ -832,6 +888,7 @@ local function MakeFrame()
         local fs = cb:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         fs:SetPoint("LEFT", cb, "RIGHT", 1, 1)
         fs:SetText(label)
+        fs:SetTextColor(C.text[1], C.text[2], C.text[3])
         cb:SetScript("OnClick", function(self) DB[key] = self:GetChecked() and true or false; HRA:Refresh() end)
         cb:SetScript("OnEnter", function(self)
             GameTooltip:SetOwner(self, "ANCHOR_TOP")
@@ -844,9 +901,9 @@ local function MakeFrame()
         x = x + 22 + math.max(fs:GetStringWidth(), 30) + 12
     end
 
-    local refresh = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    refresh:SetSize(80, 22)
-    refresh:SetPoint("BOTTOMRIGHT", -18, 16)
+    local refresh = CreateFrame("Button", nil, f, "GameMenuButtonTemplate")
+    refresh:SetSize(110, 26)
+    refresh:SetPoint("BOTTOMRIGHT", -20, 14)
     refresh:SetText("Refresh")
     refresh:SetScript("OnClick", function() HRA:Refresh() end)
 
@@ -887,7 +944,9 @@ function HRA:Refresh()
     for key, cb in pairs(f.checks) do cb:SetChecked(DB[key]) end
     for _, b in ipairs(f.headers) do
         local active = b.col.sort and b.col.sort == DB.sort
-        b.fs:SetText((active and "|cffffffff" or "|cffd4a017") .. b.col.label .. (active and " v" or "") .. "|r")
+        b.fs:SetText(b.col.label .. (active and " v" or ""))
+        if active then b.fs:SetTextColor(1, 0.82, 0)
+        else b.fs:SetTextColor(C.header[1], C.header[2], C.header[3]) end
     end
 
     local hpsLo, hpsHi, hpmLo, hpmHi
@@ -905,12 +964,12 @@ function HRA:Refresh()
         local row = GetRow(i)
         local newGroup = r.name ~= prevName
         local grouped = DB.sort == "spell"
-        if grouped and newGroup and i > 1 then y = y - 5 end
+        if grouped and newGroup and i > 1 then y = y - 6 end
         row:ClearAllPoints()
         row:SetPoint("TOPLEFT", f.child, "TOPLEFT", 0, y)
         row:SetPoint("TOPRIGHT", f.child, "TOPRIGHT", 0, y)
         row.sep:SetShown(grouped and newGroup and i > 1)
-        if i % 2 == 0 then row.bg:SetColorTexture(0.2, 0.15, 0.05, 0.25) else row.bg:SetColorTexture(0, 0, 0, 0) end
+        if i % 2 == 0 then row.bg:SetColorTexture(0.353, 0.263, 0.125, 0.22) else row.bg:SetColorTexture(0, 0, 0, 0) end
         row.data = r
 
         local c = row.cells
@@ -924,8 +983,8 @@ function HRA:Refresh()
         local nameText = ""
         if not grouped or newGroup then
             nameText = r.name
-            if r.tf and r.tf > 1 and DB.group then nameText = nameText .. ("  |cff999999x%s|r"):format(FmtSec(r.tf)) end
-            if r.e.def.auto then nameText = nameText .. " |cff999999(auto)|r" end
+            if r.tf and r.tf > 1 and DB.group then nameText = nameText .. ("  |cff9c8d70x%s|r"):format(FmtSec(r.tf)) end
+            if r.e.def.auto then nameText = nameText .. " |cff9c8d70(auto)|r" end
         end
         set("name", nameText, COLOR.gold)
         set("rank", (r.rank and r.rank > 0) and tostring(r.rank) or "-")
@@ -962,9 +1021,9 @@ function HRA:Refresh()
         f.empty:Hide()
     end
 
-    f.info:SetText(("Level %d %s   |cff888888•|r   +Healing %s%s   |cff888888•|r   %s crit %.1f%%"):format(
+    f.info:SetText(("Level %d %s   |cff7d705a•|r   +Healing %s%s   |cff7d705a•|r   %s crit %.1f%%"):format(
         info.level, CLASS_DISPLAY[info.class] or (info.class or "?"):lower(),
-        FmtInt(info.bonus), DB.bonus and "" or " |cff888888(off)|r",
+        FmtInt(info.bonus), DB.bonus and "" or " |cff7d705a(off)|r",
         ns.SCHOOL_NAME[info.school] or "Spell", info.crit or 0))
 
     f:Show()
