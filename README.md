@@ -27,7 +27,7 @@ The addon does nothing in the background. The table is calculated only when:
 
 Re-opening the window shows the last results, and the top line shows the time they were calculated ("Updated 14:32"). Click Refresh after levelling, training, respeccing or changing gear. Sorting by a column only re-orders the existing rows.
 
-Learning from your casts (HoT durations, mana actually spent) only listens while the window is open. Learned values appear the next time you click Refresh.
+Learning HoT durations from your casts only listens while the window is open. Learned values appear the next time you click Refresh.
 
 Errors are caught instead of being shown on screen. The first one prints a single chat line, and `/hra errors` opens a window where you can select and copy them all.
 
@@ -85,7 +85,7 @@ New WoW Forever talents worded in the usual "Reduces the cast time of your X spe
 Each effect is only applied if the game hasn't already applied it, so nothing is counted twice:
 
 - **Healing %** is already in WoW Forever's tooltips (verified for Improved Renew). Once a spell's coefficient has been measured, the addon checks the tooltip actually contains the talent multiplier and applies it itself if it doesn't.
-- **Mana cost.** The game's cost is assumed to include cost talents. The first time you cast a heal, the addon compares the mana actually spent with the game's cost. If they differ by the talent's %, it applies cost talents itself from then on. Mana shown in green has been confirmed by a cast, yellow means the addon applied the talent.
+- **Mana cost.** The game's spell cost already includes cost talents (verified in game: Lesser Heal rank 3 costs 64 mana with Improved Healing 3/3, which is 75 minus 15%). The addon uses the game's cost as-is and lists which talents lowered it when you hover a row.
 - **Crit.** The character sheet shows only your base spell crit. Talents are never included (verified in game: 6.9% with 0 and with 5 points in Holy Specialization). The addon adds every crit talent that applies to a spell on top. The **Crit** column shows each heal's crit chance (yellow = includes talents, "-" for HoTs), and the header shows your crit with talents.
 
 `/hra talents` lists every talent effect found and whether mana cost talents are in the game's costs. Hover a row to see which talents affect that spell.
@@ -101,7 +101,6 @@ Each effect is only applied if the game hasn't already applied it, so nothing is
 - Estimated +healing shares use vanilla coefficients until the addon has measured a rank. This only affects the Bonus column and the +Healing-off view, not Avg Heal/HPS/HPM.
 - Conditional talent effects (Renewed Hope, Illumination, Litany of Light, Inner Focus) aren't modelled.
 - Tooltip parsing assumes an English client.
-
 
 
 ## Example Images
