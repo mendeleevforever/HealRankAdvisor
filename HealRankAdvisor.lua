@@ -7,16 +7,17 @@ local HRA = {}
 _G.HealRankAdvisor = HRA
 ns.HRA = HRA
 
-local VERSION = "1.1.0"
+local VERSION = "1.3.0"
 local GCD     = 1.5
 local DB
 
 local DEFAULTS = {
-    bonus         = true,   -- add +healing (spell power) using coefficients
+    bonus         = true,   -- include +healing (tooltips already do; off = show base heal)
     crit          = true,   -- include average crit contribution on direct heals
     group         = true,   -- multiply group heals by number of targets
     untrained     = true,   -- show ranks available at your level but not trained
     hotByDuration = false,  -- HoT HPS = total / HoT duration instead of / cast time
+    samples       = {},     -- [spellID] = tooltip values at low/high +healing, to measure coefficients
     sort          = "spell",
     observed      = {},     -- [spellID] = { dur = seconds, sig = talentSignature }
 }
@@ -283,10 +284,31 @@ local function AddMod(tbl, spell, amount, src)
     m.sources[#m.sources + 1] = src
 end
 
-function ns.ParseTalentText(text, cast, dur, src)
+function ns.ParseTalentText(text, cast, dur, src, heal)
     local t = text:lower() .. ". "
     local found = false
     for clause in t:gmatch("(.-)%.%s") do
+        -- Healing % talents: "Increases the amount healed by your Renew spell by 15%",
+        -- "...healed by your spells by 3%", "...damage and healing of your instant cast spells by 5%"
+        if heal and clause:find("increas") and (clause:find("heal") or clause:find("effect of your")) then
+            local chunk, pct = clause:match("healed by your (.-) by ([%d%.]+)%%")
+            if not chunk then chunk, pct = clause:match("effect of your (.-) by ([%d%.]+)%%") end
+            if not chunk then chunk, pct = clause:match("healing done by your (.-) by ([%d%.]+)%%") end
+            if not chunk then chunk, pct = clause:match("healing of your (.-) by ([%d%.]+)%%") end
+            pct = pct and tonumber((pct:gsub("%.$", "")))
+            if chunk and pct and pct > 0 then
+                chunk = chunk:gsub("^%s+", ""):gsub("%s+$", "")
+                if chunk == "spells" or chunk == "healing spells" then
+                    AddMod(heal, "*", pct, src)
+                elseif chunk:find("instant") then
+                    AddMod(heal, "@instant", pct, src)
+                else
+                    chunk = chunk:gsub(" spells?$", "")
+                    for _, n in ipairs(SplitNames(chunk)) do AddMod(heal, n, pct, src) end
+                end
+                found = true
+            end
+        end
         local isDur  = clause:find("duration") and (clause:find("increas") or clause:find("extend"))
         local isCast = (not isDur) and clause:find("cast")
                        and (clause:find("reduc") or clause:find("decreas") or clause:find("shorten"))
@@ -337,7 +359,7 @@ local function TalentSig()
 end
 
 function HRA:GetTalentMods()
-    local mods = { cast = {}, dur = {} }
+    local mods = { cast = {}, dur = {}, heal = {} }
     pcall(function()
         for tab = 1, (GetNumTalentTabs() or 0) do
             for i = 1, (GetNumTalents(tab) or 0) do
@@ -345,12 +367,13 @@ function HRA:GetTalentMods()
                 if name and rank and rank > 0 then
                     local src  = ("%s %d"):format(name, rank)
                     local text = TalentText(tab, i)
-                    local found = text ~= "" and ns.ParseTalentText(text, mods.cast, mods.dur, src)
+                    local found = text ~= "" and ns.ParseTalentText(text, mods.cast, mods.dur, src, mods.heal)
                     local fb = ns.TALENT_FALLBACK[name]
                     if not found and fb then
                         local mult = fb.perRank and rank or 1
                         for sp, v in pairs(fb.cast or {}) do AddMod(mods.cast, sp, v * mult, src .. "*") end
                         for sp, v in pairs(fb.dur  or {}) do AddMod(mods.dur,  sp, v * mult, src .. "*") end
+                        for sp, v in pairs(fb.heal or {}) do AddMod(mods.heal, sp, v * mult, src .. "*") end
                     end
                 end
             end
@@ -429,7 +452,53 @@ end
 -- ============================================================
 -- COMPUTATION
 -- ============================================================
-function HRA:ComputeEntry(e, mods, sig, bonus, critPct)
+
+-- Note: the original game's below-level-20 penalty does NOT exist in WoW Forever.
+-- In-game tooltips (level 30 priest, 16 vs 151 spell healing) show Heal rank 1
+-- (learned at 16) and Renew rank 2 (learned at 14) keeping their full coefficient.
+
+-- WoW Forever downranking nerf: once you are 18+ levels past the level a rank
+-- is learned at, it loses 5% of its +healing coefficient per level.
+--   share = 1 - (L - 17 - T) * 0.05, clamped to 0..1
+--   L = your level, T = level the rank is learned at
+-- Measured in the beta (levels 18-30); Blizzard confirmed the mechanic without numbers.
+-- Confirmed against in-game tooltips for Lesser Heal 2-3, Renew 1-4 and Heal 1-3 at
+-- level 30. Lesser Heal rank 1 kept less than predicted (~24% vs 40%), so the addon
+-- prefers coefficients it measures from your own tooltips (see HRA:LearnSlope).
+ns.DOWNRANK_GRACE    = 17     -- full bonus while L - T <= 17
+ns.DOWNRANK_PER_LVL  = 0.05   -- share lost per level beyond that
+
+function ns.DownrankShare(playerLevel, learnLevel)
+    if not playerLevel or not learnLevel or learnLevel <= 0 then return 1 end
+    return Clamp(1 - (playerLevel - ns.DOWNRANK_GRACE - learnLevel) * ns.DOWNRANK_PER_LVL, 0, 1)
+end
+-- Healing % from talents that applies to this spell (used only for estimates;
+-- tooltip values and measured coefficients already include it).
+local function HealMult(mods, def, isInstant)
+    local h = mods.heal or {}
+    local pct = (h[def.lname] and h[def.lname].amount or 0) + (h["*"] and h["*"].amount or 0)
+    if isInstant and h["@instant"] then pct = pct + h["@instant"].amount end
+    return 1 + pct / 100
+end
+
+-- Remembers each rank's tooltip value at the lowest and highest +healing seen
+-- (same level and talents). Once they are 20+ apart, the slope is the rank's
+-- true +healing coefficient including talents and the downranking penalty.
+function HRA:LearnSlope(id, level, sig, sp, value)
+    DB.samples = DB.samples or {}
+    local s = DB.samples[id]
+    if not s or s.lvl ~= level or s.sig ~= sig then
+        s = { lvl = level, sig = sig, lo = { sp, value }, hi = { sp, value } }
+        DB.samples[id] = s
+    else
+        if sp < s.lo[1] then s.lo = { sp, value } elseif sp == s.lo[1] then s.lo[2] = value end
+        if sp > s.hi[1] then s.hi = { sp, value } elseif sp == s.hi[1] then s.hi[2] = value end
+    end
+    local dsp = s.hi[1] - s.lo[1]
+    if dsp >= 20 then return (s.hi[2] - s.lo[2]) / dsp, s.lo[1], s.hi[1] end
+end
+
+function HRA:ComputeEntry(e, mods, sig, bonus, critPct, playerLevel)
     local def  = e.def
     local desc = SpellDesc(e.id)
     local row  = { e = e, id = e.id, name = def.name, rank = e.rank, level = e.level,
@@ -487,8 +556,9 @@ function HRA:ComputeEntry(e, mods, sig, bonus, critPct)
     elseif p.tick and ttDur and p.interval > 0 then
         hot = p.tick * math.floor(ttDur / p.interval + 0.001)
     end
+    local durScale = 1
     if hot > 0 and ttDur and effDur and ttDur > 0 and math.abs(effDur - ttDur) > 0.05 then
-        hot = hot * effDur / ttDur       -- extra ticks heal for the same amount
+        durScale = effDur / ttDur        -- extra ticks heal for the same amount
     end
 
     -- ---- Targets ----
@@ -513,27 +583,52 @@ function HRA:ComputeEntry(e, mods, sig, bonus, critPct)
         elseif direct > 0 then cd = c else ch = h end
         if tf > 1 then cd, ch = cd / 3, ch / 3 end
     end
-    local penalty = 1
-    if e.level and e.level > 0 and e.level < 20 then penalty = 1 - (20 - e.level) * 0.0375 end
-    cd, ch = cd * penalty, ch * penalty
+    if direct <= 0 then cd = 0 end
+    if hot <= 0 then ch = 0 end
+    -- HoT coefficient covers the base duration; a tooltip that already shows a
+    -- talent-extended duration also shows the extra ticks' +healing
+    if ch > 0 and def.baseDur and ttDur and not def.channel and not def.totem then
+        ch = ch * ttDur / def.baseDur
+    end
 
-    local bD, bH = 0, 0
-    if DB.bonus and bonus > 0 then
-        if direct > 0 then bD = cd * bonus end
-        if hot > 0 then
-            local baseD = def.baseDur or ttDur
-            local ratio = (baseD and effDur and baseD > 0) and (effDur / baseD) or 1
-            if def.channel or def.totem then ratio = 1 end
-            bH = ch * bonus * ratio
+    -- ---- +Healing ----
+    -- WoW Forever's tooltips already include your +healing, the downranking penalty
+    -- and healing talents (verified in game), so the tooltip value is used as-is.
+    -- The addon only works out the +healing portion, to show it or remove it.
+    local share  = ns.DownrankShare(playerLevel, e.level)
+    local mult   = HealMult(mods, def, castNow <= 0 and not def.channel)
+    local estD, estH = cd * share * mult, ch * share * mult     -- per point of +healing
+    local slope, sLo, sHi = self:LearnSlope(e.id, playerLevel, sig, bonus, direct + hot)
+    local perD, perH = estD, estH
+    local includes, measured = true, false
+    local fullCoef = (cd + ch) * mult
+    if slope then
+        measured = true
+        if math.abs(slope) < 0.02 and fullCoef * share > 0.05 then
+            includes = false              -- tooltip didn't move with +healing: add it ourselves
+        else
+            local est = estD + estH
+            if est > 0 then
+                perD, perH = estD * slope / est, estH * slope / est
+            else
+                local sum = direct + hot
+                perD = sum > 0 and slope * direct / sum or 0
+                perH = sum > 0 and slope * hot / sum or 0
+            end
+            if fullCoef > 0 then share = Clamp(slope / fullCoef, 0, 1.5) end
         end
     end
+    local bD, bH = perD * bonus, perH * bonus
+    local directBase = includes and math.max(direct - bD, 0) or direct
+    local hotBase    = includes and math.max(hot - bH, 0) or hot
 
     -- ---- Crit (direct portion only) ----
     local critMult = 1
     if DB.crit and direct > 0 then critMult = 1 + (critPct / 100) * 0.5 end
 
-    local directAvg = (direct + bD) * critMult
-    local hotAvg    = hot + bH
+    local directAvg = (directBase + (DB.bonus and bD or 0)) * critMult
+    local hotAvg    = (hotBase + (DB.bonus and bH or 0)) * durScale
+    hot = hot * durScale
     local perTarget = directAvg + hotAvg
     local total     = perTarget * factor
 
@@ -554,7 +649,13 @@ function HRA:ComputeEntry(e, mods, sig, bonus, critPct)
     row.channel, row.totem = def.channel, def.totem
     row.ttDur, row.effDur, row.durSrc = ttDur, (hot > 0) and effDur or nil, durSrc
     row.direct, row.hot, row.bD, row.bH = direct, hot, bD, bH
-    row.cd, row.ch, row.penalty = cd, ch, penalty
+    row.cd, row.ch, row.mult = cd, ch, mult
+    row.bonusShare, row.shareMeasured = share, measured
+    row.slope, row.slopeLo, row.slopeHi = slope, sLo, sHi
+    row.tooltipHasBonus = includes
+    row.bonusAmt = (bD + bH * durScale)
+    row.spellHealing = bonus
+    row.playerLevel = playerLevel
     row.critMult, row.critPct = critMult, critPct
     row.tf, row.factor = tf, factor
     row.time, row.mana, row.total = time, mana, total
@@ -577,7 +678,7 @@ function HRA:ComputeRows()
     local rows = {}
     for _, e in ipairs(entries) do
         local show = e.known or (DB.untrained and e.level > 0 and e.level <= level)
-        if show then rows[#rows + 1] = self:ComputeEntry(e, mods, sig, bonus, critPct) end
+        if show then rows[#rows + 1] = self:ComputeEntry(e, mods, sig, bonus, critPct, level) end
     end
     self.lastMods = mods
     return rows, { level = level, class = class, bonus = bonus, crit = critPct, school = school }
@@ -608,9 +709,10 @@ local C = {
 }
 
 local COLS = {
-    { key = "name",  label = "Spell",    w = 190, justify = "LEFT",   sort = "spell" },
+    { key = "name",  label = "Spell",    w = 150, justify = "LEFT",   sort = "spell" },
     { key = "rank",  label = "Rank",     w = 36,  justify = "CENTER" },
     { key = "level", label = "Lvl",      w = 30,  justify = "CENTER" },
+    { key = "bonus", label = "Bonus",    w = 46,  justify = "RIGHT" },
     { key = "cast",  label = "Cast",     w = 54,  justify = "RIGHT" },
     { key = "dur",   label = "HoT",      w = 40,  justify = "RIGHT" },
     { key = "mana",  label = "Mana",     w = 48,  justify = "RIGHT",  sort = "mana" },
@@ -681,12 +783,33 @@ local function RowOnEnter(self)
             GT:AddDoubleLine("  HoT rate:", ("%.1f per sec"):format(r.hotAvg / r.effDur), 0.6, 0.6, 0.6, 0.8, 0.8, 0.8)
         end
     end
-    if DB.bonus then
-        local coefText = (r.cd > 0 and ("%.0f%% direct"):format(r.cd * 100) or "")
-        if r.ch > 0 then coefText = coefText .. (coefText ~= "" and ", " or "") .. ("%.0f%% HoT"):format(r.ch * 100) end
-        if coefText == "" then coefText = "none" end
-        GT:AddDoubleLine("+Healing added:", ("+%s  (coef %s)"):format(FmtInt(r.bD + r.bH), coefText), 0.8, 0.8, 0.8, 0.6, 1, 0.6)
-        if r.penalty < 1 then GT:AddLine(("  below-level-20 penalty: x%.2f"):format(r.penalty), 0.6, 0.6, 0.6) end
+    do
+        local share = math.floor((r.bonusShare or 0) * 100 + 0.5)
+        GT:AddDoubleLine("+Healing share:", ("%d%%  (%s)"):format(share, r.shareMeasured and "measured" or "estimated"),
+            0.8, 0.8, 0.8, r.shareMeasured and 0.4 or 1, 1, r.shareMeasured and 0.4 or 1)
+        local verb = r.tooltipHasBonus and "in tooltip" or "added by addon"
+        if not DB.bonus then verb = "removed (+Healing off)" end
+        GT:AddDoubleLine("+Healing " .. verb .. ":", ("%s  (of %d)"):format(FmtInt(r.bonusAmt), r.spellHealing),
+            0.8, 0.8, 0.8, 0.6, 1, 0.6)
+        if r.shareMeasured then
+            GT:AddLine(("  measured from your tooltips at %d and %d spell healing"):format(r.slopeLo, r.slopeHi), 0.6, 0.6, 0.6)
+        else
+            GT:AddLine("  change your +healing by 20+ (swap gear) to measure it", 0.6, 0.6, 0.6)
+        end
+        if r.mult and r.mult > 1.0001 then
+            GT:AddLine(("  includes +%s%% healing from talents"):format(FmtSec((r.mult - 1) * 100)), 0.6, 0.6, 0.6)
+        end
+        if r.level and r.level > 0 then
+            local fadeStart = r.level + ns.DOWNRANK_GRACE + 1
+            local gone = r.level + ns.DOWNRANK_GRACE + math.ceil(1 / ns.DOWNRANK_PER_LVL)
+            if r.playerLevel >= gone then
+                GT:AddLine(("  downranking: no +healing left since level %d"):format(gone), 1, 0.4, 0.3)
+            elseif r.playerLevel >= fadeStart then
+                GT:AddLine(("  downranking: -5%% per level since %d, none left at %d"):format(fadeStart, gone), 1, 0.6, 0.3)
+            else
+                GT:AddLine(("  full +healing until level %d, then -5%% per level"):format(fadeStart - 1), 0.6, 0.6, 0.6)
+            end
+        end
     end
     if DB.crit and r.critMult > 1 then
         GT:AddDoubleLine("Crit:", ("%.1f%%  (x%.3f on direct part)"):format(r.critPct, r.critMult), 0.8, 0.8, 0.8, 1, 1, 1)
@@ -734,7 +857,7 @@ local function GetRow(i)
 end
 
 local OPTION_TIPS = {
-    bonus = "Add your +healing (spell power) to each rank using standard spell coefficients.",
+    bonus = "Include your +healing. WoW Forever tooltips already include it (with the downranking penalty), so this is on by default. Turn off to see each rank's base heal.",
     crit = "Include the average value of critical heals (direct heals only; HoTs don't crit).",
     group = "Multiply group heals (Prayer of Healing, Chain Heal, Tranquility, ...) by the number of targets they hit.",
     untrained = "Also list ranks you could train at your level but haven't yet (shown in grey).",
@@ -871,7 +994,7 @@ local function MakeFrame()
     f.legend:SetTextColor(C.legend[1], C.legend[2], C.legend[3])
     f.legend:SetText("Cast / HoT colour:  |cffe6d6aenormal|r = from game client,  "
         .. "|cffffe64dyellow|r = talent applied by addon,  "
-        .. "|cff66ff66green|r = duration observed on your own aura.   Hover a row for the full breakdown.")
+        .. "|cff66ff66green|r = duration observed on your own aura.   Bonus: ~ = estimated, no ~ = measured.   Hover a row for details.")
 
     -- Options
     local x = SCROLL_LEFT
@@ -991,7 +1114,7 @@ function HRA:Refresh()
         set("level", (r.level and r.level > 0) and tostring(r.level) or "-")
 
         if r.pending then
-            set("cast", ""); set("dur", ""); set("mana", ""); set("hps", ""); set("hpm", "")
+            set("bonus", ""); set("cast", ""); set("dur", ""); set("mana", ""); set("hps", ""); set("hpm", "")
             set("heal", "loading...", COLOR.grey)
         else
             local castText
@@ -999,6 +1122,13 @@ function HRA:Refresh()
             elseif r.cast <= 0 then castText = "Inst"
             else castText = FmtSec(r.cast) .. "s" end
             set("cast", castText, r.castAdjusted and COLOR.yellow or nil)
+
+            -- Share of +healing this rank keeps (WoW Forever downranking).
+            -- "~" = estimated from the formula, no "~" = measured from your tooltips.
+            local share = r.bonusShare or 1
+            local shareCol = share >= 0.995 and nil or { Grad(share, 0, 1) }
+            if not DB.bonus then shareCol = COLOR.grey end
+            set("bonus", ("%s%d%%"):format(r.shareMeasured and "" or "~", math.floor(share * 100 + 0.5)), shareCol)
 
             local durCol = (r.durSrc == "observed" and COLOR.green) or (r.durSrc == "talent" and COLOR.yellow) or nil
             set("dur", (r.effDur and not r.channel) and (FmtSec(r.effDur) .. "s") or "-", durCol)
@@ -1112,10 +1242,11 @@ SlashCmdList["HEALRANKADVISOR"] = function(msg)
         if not ok then print("error: " .. tostring(rows)) return end
         for _, r in ipairs(rows) do
             local p = r.parsed or {}
-            print(("[%d] %s r%s lvl%s | castNow=%s ttDur=%s effDur=%s(%s) | min=%s max=%s hot=%s tick=%s/%s | tf=%s mana=%s | HPS=%s HPM=%s"):format(
+            print(("[%d] %s r%s lvl%s | castNow=%s ttDur=%s effDur=%s(%s) | min=%s max=%s hot=%s tick=%s/%s | tf=%s mana=%s bonus%%=%s | HPS=%s HPM=%s"):format(
                 r.id, r.name, tostring(r.rank), tostring(r.level), tostring(r.castNow), tostring(r.ttDur),
                 tostring(r.effDur), tostring(r.durSrc), tostring(p.min), tostring(p.max), tostring(p.hotTotal),
                 tostring(p.tick), tostring(p.interval), tostring(r.tf), tostring(r.mana),
+                r.bonusShare and tostring(math.floor(r.bonusShare * 100 + 0.5)) or "-",
                 r.hps and ("%.1f"):format(r.hps) or "-", r.hpm and ("%.2f"):format(r.hpm) or "-"))
         end
         return

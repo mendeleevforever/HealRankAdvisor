@@ -5,7 +5,8 @@
 --   * find every rank of a spell (including ranks you haven't trained yet),
 --   * know the BASE cast time / duration of a spell so it can tell whether a
 --     talent bonus is already included in the client's numbers or not,
---   * look up +healing coefficients.
+--   * look up +healing coefficients (WoW Forever tooltips already include your
+--     +healing; coefficients are only used to show or remove that portion).
 --
 -- Rank tuple: { spellID, learnLevel, baseCastSeconds }
 -- (learnLevel is only a fallback; the client is asked first.)
@@ -94,6 +95,8 @@ ns.SPELLS = {
 -- The addon reads your talent tooltips and understands lines like
 --   "Reduces the casting time of your Heal and Greater Heal spells by 0.5 sec"
 --   "Increases the duration of your Rejuvenation spell by 3 sec, your Regrowth spell by 6 sec"
+--   "Increases the amount healed by your Renew spell by 15%"   (heal = { spell = pct })
+--   ("*" = all heals, "@instant" = instant-cast heals)
 -- so new WoW Forever talents are picked up automatically.
 -- The table below is only used if a talent's tooltip can't be read/understood.
 -- perRank = true  -> value is multiplied by the talent's current rank.
@@ -105,6 +108,9 @@ ns.TALENT_FALLBACK = {
     ["Improved Healing Wave"]  = { perRank = true, cast = { ["healing wave"] = 0.1 } },
     ["Improved Healing Touch"] = { perRank = true, cast = { ["healing touch"] = 0.1 } },
     ["Naturalist"]             = { perRank = true, cast = { ["healing touch"] = 0.1 } },
+    ["Improved Renew"]         = { perRank = true, heal = { ["renew"] = 5 } },
+    ["Spiritual Healing"]      = { perRank = true, heal = { ["*"] = 3 } },
+    ["Twin Disciplines"]       = { perRank = true, heal = { ["@instant"] = 1 } },
 }
 
 -- Spells that mention healing but don't belong in a heal-efficiency table.
