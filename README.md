@@ -55,7 +55,8 @@ New WoW Forever talents worded in the usual "Reduces the cast time of your X spe
 - Tooltip parsing assumes an English client.
 
 ## Example Images
-<img width="1667" height="642" alt="HealRankAdvisor screenshot 1" src="https://github.com/user-attachments/assets/4c4e2a8b-b76a-48c5-9804-f37283526d84" />
+
+<img width="922" height="691" alt="HealRankAdvisor screenshot" src="https://github.com/user-attachments/assets/dc3c6398-4af8-4a37-9df1-e6fad1404437" />
 
 Note how Holy Light Rank 4 is greyed out as it has not been trained.
 
@@ -65,8 +66,8 @@ Holy Light Rank 4 not yet trained.
 
 <img width="857" height="669" alt="HealRankAdvisor screenshot 3" src="https://github.com/user-attachments/assets/0ba2a27b-18e1-43ae-905d-90182c3ad28c" />
 
-HRA as shown on an undead level 30 discipline priest.
+HRA as shown on an undead level 30 discipline priest. (OLD GUI)
 
 <img width="839" height="651" alt="HealRankAdvisor screenshot 4" src="https://github.com/user-attachments/assets/738fe531-e6a4-43f4-a5e3-f3ea046d910a" />
 
-HRA as shown on an undead level 30 holy priest.
+HRA as shown on an undead level 30 holy priest. (OLD GUI)
