@@ -11,14 +11,29 @@ Copy the `HealRankAdvisor/` folder into your WoW Forever `Interface/AddOns/` dir
 | Command | Effect |
 |---|---|
 | `/hra` or `/healranks` | Toggle the table |
-| `/hra talents` | List talents detected as changing cast time, HoT duration, healing, mana cost or crit |
+| `/hra talents` | List your talents (and how they were read) plus every effect found on your heals |
 | `/hra debug` | Print the raw parsed values for every row (useful for bug reports) |
 | `/hra resetobs` | Forget learned HoT durations, mana costs and coefficient measurements |
+| `/hra errors` | Show caught errors in a window you can copy from |
 | `/hra help` | Show help |
+
+## When the table updates
+
+The addon does nothing in the background. The table is calculated only when:
+
+- you open it for the first time in a session,
+- you click **Refresh**, or
+- you tick or untick one of the options.
+
+Re-opening the window shows the last results, and the top line shows the time they were calculated ("Updated 14:32"). Click Refresh after levelling, training, respeccing or changing gear. Sorting by a column only re-orders the existing rows.
+
+Learning from your casts (HoT durations, mana actually spent) only listens while the window is open. Learned values appear the next time you click Refresh.
+
+Errors are caught instead of being shown on screen. The first one prints a single chat line, and `/hra errors` opens a window where you can select and copy them all.
 
 ## The table
 
-Columns: Spell, Rank, level learned, Bonus (share of your +healing the rank keeps; ~ = estimated), Cast time, HoT duration, Mana, Average heal, HPS, HPM. HPS and HPM are colour-graded red → yellow → green across your trained ranks. Click the Spell, Mana, Avg Heal, HPS or HPM header to sort. Hover any row for a full breakdown including the spell's tooltip text.
+Columns: Spell, Rank, level learned, Bonus (share of your +healing the rank keeps; ~ = estimated), Cast time, HoT duration, Mana, Crit, Average heal, HPS, HPM. HPS and HPM are colour-graded red → yellow → green across your trained ranks. Click the Spell, Mana, Avg Heal, HPS or HPM header to sort. Hover any row for a full breakdown including the spell's tooltip text.
 
 Options along the bottom:
 
@@ -55,6 +70,10 @@ Extra HoT time adds extra ticks, so total HoT healing (and its +healing share) i
 
 New WoW Forever talents worded in the usual "Reduces the cast time of your X spell by N sec" / "Increases the duration of your X spell by N sec" way are picked up automatically. `Data.lua` contains a small fallback table (`ns.TALENT_FALLBACK`) used only if a talent's tooltip can't be read.
 
+**How talents are read.** WoW Forever has no `GetNumTalentTabs` / `GetTalentInfo`. Its talent frame uses the modern trait system, so the addon reads your talents the same way: through `C_ClassTalents` and `C_Traits` (config → trees → nodes → rank and spell). Each talent's text comes from its trait tooltip at your current rank. The old Classic functions are still tried as a fallback on other clients. If a tooltip can't be read, the fallback table in `Data.lua` is used and marked with `*` in `/hra talents`.
+
+**Secret values.** Like Midnight, Forever can return "secret" values (for example your mana in combat) that addons can't compare. The cast-learning code checks for them and skips that cast instead of raising an error.
+
 **Healing %, mana cost and crit talents.** The addon reads every talent you have points in and understands wording such as:
 
 - "Increases the amount healed by your Renew spell by 15%" / "Increases the damage and healing of your instant cast spells by 5%" (Improved Renew, Twin Disciplines, Spiritual Healing, ...)
@@ -67,7 +86,7 @@ Each effect is only applied if the game hasn't already applied it, so nothing is
 
 - **Healing %** is already in WoW Forever's tooltips (verified for Improved Renew). Once a spell's coefficient has been measured, the addon checks the tooltip actually contains the talent multiplier and applies it itself if it doesn't.
 - **Mana cost.** The game's cost is assumed to include cost talents. The first time you cast a heal, the addon compares the mana actually spent with the game's cost. If they differ by the talent's %, it applies cost talents itself from then on. Mana shown in green has been confirmed by a cast, yellow means the addon applied the talent.
-- **Crit.** Talents for one spell or for instant spells are always added to your character-sheet crit. For school-wide talents ("your Holy spells"), the addon compares your Holy (or Nature) crit with your other spell schools: if it is already higher by the talent's amount, the talent is on the character sheet already.
+- **Crit.** The character sheet shows only your base spell crit. Talents are never included (verified in game: 6.9% with 0 and with 5 points in Holy Specialization). The addon adds every crit talent that applies to a spell on top. The **Crit** column shows each heal's crit chance (yellow = includes talents, "-" for HoTs), and the header shows your crit with talents.
 
 `/hra talents` lists every talent effect found and whether mana cost talents are in the game's costs. Hover a row to see which talents affect that spell.
 
@@ -82,6 +101,7 @@ Each effect is only applied if the game hasn't already applied it, so nothing is
 - Estimated +healing shares use vanilla coefficients until the addon has measured a rank. This only affects the Bonus column and the +Healing-off view, not Avg Heal/HPS/HPM.
 - Conditional talent effects (Renewed Hope, Illumination, Litany of Light, Inner Focus) aren't modelled.
 - Tooltip parsing assumes an English client.
+
 
 
 ## Example Images
