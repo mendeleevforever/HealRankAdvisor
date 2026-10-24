@@ -4,7 +4,7 @@ A table of every healing spell rank available to your character, with average **
 
 ## Installation
 
-Copy the `HealRankAdvisor/` folder into your WoW Forever `Interface/AddOns/` directory (the same place `WaylaidCrateAdvisor` lives), then `/reload`.
+Copy the `HealRankAdvisor/` folder into your WoW Forever `Interface/AddOns/` directory, then `/reload`.
 
 ## Commands
 
