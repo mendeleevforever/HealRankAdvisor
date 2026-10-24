@@ -1015,7 +1015,7 @@ local FRAME_W, FRAME_H = 770, 540
 local SCROLL_LEFT = 20          -- scroll area inset from the window's left edge
 local CHILD_W = FRAME_W - SCROLL_LEFT - 40
 
--- Palette (r, g, b) — shared with Waylaid Crate Advisor
+-- Palette (r, g, b)
 local C = {
     bg        = { 0.118, 0.082, 0.051 },
     gold      = { 0.541, 0.416, 0.173 },

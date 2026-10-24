@@ -1,9 +1,10 @@
 ## Interface: 16001
 ## Title: Heal Rank Advisor
 ## Notes: Healing per Second and Healing per Mana for every healing spell rank you can use
-## Author: You
+## Author: MendeleevForever
 ## Version: 1.0.0
 ## IconTexture: 135980
+## X-Curse-Project-ID: 1762670
 ## SavedVariablesPerCharacter: HealRankAdvisorCharDB
 ## OptionalDeps: LibStub, CallbackHandler-1.0, LibDataBroker-1.1, LibDBIcon-1.0
 ## X-Embeds: LibStub, CallbackHandler-1.0, LibDataBroker-1.1, LibDBIcon-1.0

@@ -117,6 +117,14 @@ Each effect is only applied if the game hasn't already applied it, so nothing is
 
 1.0.0
 
+## Author
+
+MendeleevForever
+
+## CurseForge
+
+Project ID 1762670
+
 ## Libraries
 
 Embedded in `Libs/`: LibStub, CallbackHandler-1.0, LibDataBroker-1.1 and LibDBIcon-1.0 (v12.1.1), which provide the minimap button. If another addon loads a newer copy of any of these, LibStub uses the newest one automatically.
