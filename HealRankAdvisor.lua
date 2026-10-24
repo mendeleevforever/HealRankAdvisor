@@ -7,7 +7,7 @@ local HRA = {}
 _G.HealRankAdvisor = HRA
 ns.HRA = HRA
 
-local VERSION = "1.8.0"
+local VERSION = "1.0.0"
 local GCD     = 1.5
 local DB
 
@@ -21,6 +21,7 @@ local DEFAULTS = {
     healMode      = {},     -- [spell name] = whether talent healing % is in the tooltip
     sort          = "spell",
     observed      = {},     -- [spellID] = { dur = seconds, sig = talentSignature }
+    minimap       = { hide = false },   -- LibDBIcon button settings (position, hidden)
 }
 
 -- ============================================================
@@ -1674,6 +1675,64 @@ local function ObserveHot(spellID, castAt)
 end
 
 -- ============================================================
+-- MINIMAP BUTTON (LibDataBroker + LibDBIcon)
+-- Left-click opens/closes the table, right-click opens it and recalculates.
+-- Drag to move it around the minimap. /hra minimap shows or hides it.
+-- ============================================================
+local MINIMAP_ICON = 135980   -- spell_holy_summonlightwell
+
+function HRA:SetupMinimapButton()
+    if self.minimapReady or not LibStub then return end
+    local ldb  = LibStub("LibDataBroker-1.1", true)
+    local icon = LibStub("LibDBIcon-1.0", true)
+    if not ldb or not icon then return end
+    DB.minimap = DB.minimap or { hide = false }
+
+    local launcher = ldb:NewDataObject(ADDON_NAME, {
+        type  = "launcher",
+        label = "Heal Rank Advisor",
+        text  = "Heal Rank Advisor",
+        icon  = MINIMAP_ICON,
+        OnClick = function(_, button)
+            if button == "RightButton" then
+                Safe(HRA.Refresh, HRA)       -- opens the table and recalculates
+            else
+                Safe(HRA.Toggle, HRA)
+            end
+        end,
+        OnTooltipShow = function(tt)
+            if not tt or not tt.AddLine then return end
+            tt:AddLine("Heal Rank Advisor", 1, 0.82, 0)
+            tt:AddLine(("|cffe6d6aeLeft-click|r  open / close the table"), 1, 1, 1)
+            tt:AddLine(("|cffe6d6aeRight-click|r  open and refresh"), 1, 1, 1)
+            tt:AddLine(("|cffe6d6aeDrag|r  move this button"), 1, 1, 1)
+            if HRA.updatedAt then
+                tt:AddLine(("Last calculated %s"):format(HRA.updatedAt), 0.6, 0.6, 0.6)
+            end
+        end,
+    })
+    if not launcher then return end
+    icon:Register(ADDON_NAME, launcher, DB.minimap)
+    self.ldbIcon = icon
+    self.minimapReady = true
+end
+
+function HRA:ToggleMinimapButton()
+    if not self.ldbIcon then
+        print("|cff00ff96HealRankAdvisor:|r the minimap button library isn't loaded.")
+        return
+    end
+    DB.minimap.hide = not DB.minimap.hide
+    if DB.minimap.hide then
+        self.ldbIcon:Hide(ADDON_NAME)
+        print("|cff00ff96HealRankAdvisor:|r minimap button hidden. Type /hra minimap to show it again.")
+    else
+        self.ldbIcon:Show(ADDON_NAME)
+        print("|cff00ff96HealRankAdvisor:|r minimap button shown.")
+    end
+end
+
+-- ============================================================
 -- SLASH COMMANDS
 -- ============================================================
 SLASH_HEALRANKADVISOR1 = "/hra"
@@ -1690,6 +1749,7 @@ local function SlashHandler(msg)
         print("  /hra debug      Print the parsed values for every row")
         print("  /hra resetobs   Forget learned HoT durations, mana costs and measurements")
         print("  /hra errors     Show caught errors in a window you can copy from")
+        print("  /hra minimap    Show or hide the minimap button")
         return
     elseif msg == "talents" then
         local talents = HRA:ReadTalents()
@@ -1730,6 +1790,9 @@ local function SlashHandler(msg)
         print("|cff00ff96HealRankAdvisor:|r learned durations, mana costs and measurements cleared.")
         if MainFrame and MainFrame:IsShown() then HRA:Refresh() end
         return
+    elseif msg == "minimap" then
+        HRA:ToggleMinimapButton()
+        return
     elseif msg == "refresh" then
         HRA:Refresh()
         return
@@ -1769,6 +1832,7 @@ local function OnEvent(self, event, ...)
             if DB[k] == nil then DB[k] = (type(v) == "table") and {} or v end
         end
         self:UnregisterEvent("ADDON_LOADED")
+        Safe(HRA.SetupMinimapButton, HRA)
 
     elseif event == "PLAYER_LOGIN" then
         self:UnregisterEvent("PLAYER_LOGIN")

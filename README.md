@@ -15,7 +15,18 @@ Copy the `HealRankAdvisor/` folder into your WoW Forever `Interface/AddOns/` dir
 | `/hra debug` | Print the raw parsed values for every row (useful for bug reports) |
 | `/hra resetobs` | Forget learned HoT durations, mana costs and coefficient measurements |
 | `/hra errors` | Show caught errors in a window you can copy from |
+| `/hra minimap` | Show or hide the minimap button |
 | `/hra help` | Show help |
+
+## Minimap button
+
+A minimap button with the Lightwell icon (spell_holy_summonlightwell, icon 135980) opens the table:
+
+- **Left-click:** open or close the table (shows the last results).
+- **Right-click:** open the table and recalculate it, same as Refresh.
+- **Drag:** move the button around the minimap. Its position is saved per character.
+
+`/hra minimap` hides or shows the button. The button costs nothing while you aren't using it.
 
 ## When the table updates
 
@@ -102,21 +113,10 @@ Each effect is only applied if the game hasn't already applied it, so nothing is
 - Conditional talent effects (Renewed Hope, Illumination, Litany of Light, Inner Focus) aren't modelled.
 - Tooltip parsing assumes an English client.
 
+## Version
 
-## Example Images
+1.0.0
 
-<img width="922" height="691" alt="HealRankAdvisor screenshot" src="https://github.com/user-attachments/assets/dc3c6398-4af8-4a37-9df1-e6fad1404437" />
+## Libraries
 
-Note how Holy Light Rank 4 is greyed out as it has not been trained.
-
-<img width="732" height="364" alt="HealRankAdvisor screenshot 2" src="https://github.com/user-attachments/assets/d3e40d8e-d112-4673-9a70-090977520c6a" />
-
-Holy Light Rank 4 not yet trained.
-
-<img width="857" height="669" alt="HealRankAdvisor screenshot 3" src="https://github.com/user-attachments/assets/0ba2a27b-18e1-43ae-905d-90182c3ad28c" />
-
-HRA as shown on an undead level 30 discipline priest. (OLD GUI)
-
-<img width="933" height="717" alt="HealRankAdvisor screenshot 2" src="https://github.com/user-attachments/assets/2161e752-534b-4960-ad44-7252b62a349b" />
-
-HRA as shown on an undead level 30 holy priest.
+Embedded in `Libs/`: LibStub, CallbackHandler-1.0, LibDataBroker-1.1 and LibDBIcon-1.0 (v12.1.1), which provide the minimap button. If another addon loads a newer copy of any of these, LibStub uses the newest one automatically.
