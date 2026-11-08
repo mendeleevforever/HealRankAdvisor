@@ -7,7 +7,7 @@ local HRA = {}
 _G.HealRankAdvisor = HRA
 ns.HRA = HRA
 
-local VERSION = "1.2.4"
+local VERSION = "1.3.0"
 local GCD     = 1.5
 local DB
 
@@ -1007,15 +1007,19 @@ function HRA:ComputeEntry(e, mods, sig, bonus, critPct, playerLevel)
     local directBase = includes and math.max(direct - bD, 0) or direct
     local hotBase    = includes and math.max(hot - bH, 0) or hot
 
-    -- ---- Crit (direct portion only) ----
+    -- ---- Crit ----
+    -- In WoW Forever heals over time can crit too: every tick of a HoT or channelled
+    -- heal (Renew, Rejuvenation, Regrowth's HoT, Tranquility) has the same crit chance
+    -- as a direct heal. Shields never crit; totem heals are cast by the totem, not you.
     -- The character sheet / GetSpellCritChance() shows your base spell crit only:
     -- crit talents (Holy Specialization, Improved Regrowth, ...) are never in it
     -- (verified in game: 6.9% with 0 and with 5 points in Holy Specialization),
     -- so every crit talent that applies to this spell is added on top.
     local critAdd   = critTal
     local critTotal = Clamp(critPct + critAdd, 0, 100)
+    local canCrit = not def.absorb and not def.totem and (direct > 0 or hot > 0)
     local critMult = 1
-    if DB.crit and direct > 0 and not def.absorb then critMult = 1 + (critTotal / 100) * 0.5 end
+    if DB.crit and canCrit then critMult = 1 + (critTotal / 100) * 0.5 end
 
     local directNoCrit = (directBase + (DB.bonus and bD or 0)) * extraMult
     local directAvg = directNoCrit * critMult
@@ -1029,7 +1033,7 @@ function HRA:ComputeEntry(e, mods, sig, bonus, critPct, playerLevel)
         aegis = directNoCrit * (critTotal / 100) * 1.5 * (aegisPct / 100)
         directAvg = directAvg + aegis
     end
-    local hotAvg    = (hotBase + (DB.bonus and bH or 0)) * durScale * extraMult
+    local hotAvg    = (hotBase + (DB.bonus and bH or 0)) * durScale * extraMult * critMult
     hot = hot * durScale
     local perTarget = directAvg + hotAvg
     local total     = perTarget * factor
@@ -1067,7 +1071,7 @@ function HRA:ComputeEntry(e, mods, sig, bonus, critPct, playerLevel)
     row.bonusAmt = (bD + bH * durScale) * extraMult
     row.spellHealing = bonus
     row.playerLevel = playerLevel
-    row.critMult, row.critPct = critMult, critTotal
+    row.critMult, row.critPct, row.canCrit = critMult, critTotal, canCrit
     row.aegis, row.aegisPct, row.aegisSrc = aegis, aegisPct, aegisSrc
     row.bolts, row.cooldown = p.bolts, def.cooldown
     row.tf, row.factor = tf, factor
@@ -1245,8 +1249,10 @@ local function RowOnEnter(self)
             end
         end
     end
-    if DB.crit and r.direct > 0 and not r.absorb then
-        GT:AddDoubleLine("Crit:", ("%.1f%%  (x%.3f on direct part)"):format(r.critTotal, r.critMult), 0.8, 0.8, 0.8, 1, 1, 1)
+    if DB.crit and r.canCrit then
+        local where = (r.direct > 0 and r.hot > 0) and "heal and every tick"
+            or (r.hot > 0 and "every tick") or (r.bolts and "every bolt") or "the heal"
+        GT:AddDoubleLine("Crit:", ("%.1f%%  (x%.3f on %s)"):format(r.critTotal, r.critMult, where), 0.8, 0.8, 0.8, 1, 1, 1)
         if r.critTal > 0 then
             GT:AddLine(("  %.1f%% character sheet + %s%% talents (%s)"):format(r.critClient, FmtSec(r.critAdd), r.critSrc), 0.6, 0.6, 0.6, true)
         else
@@ -1322,7 +1328,7 @@ end
 
 local OPTION_TIPS = {
     bonus = "Include your +healing. WoW Forever tooltips already include it (with the downranking penalty), so this is on by default. Turn off to see each rank's base heal.",
-    crit = "Include the average value of critical heals (direct heals only; HoTs don't crit).",
+    crit = "Include the average value of critical heals. In WoW Forever heals over time can crit too (every tick). Shields don't crit.",
     group = "Multiply group heals (Prayer of Healing, Chain Heal, Tranquility, ...) by the number of targets they hit.",
     untrained = "Also list ranks you could train at your level but haven't yet (shown in grey).",
     hotByDuration = "HoT HPS = total heal / HoT duration (healing per second on the target) instead of total heal / time spent casting.",
@@ -1699,8 +1705,8 @@ function HRA:Render()
             local durCol = (r.durSrc == "observed" and COLOR.green) or (r.durSrc == "talent" and COLOR.yellow) or nil
             set("dur", (r.effDur and not r.channel) and (FmtSec(r.effDur) .. "s") or "-", durCol)
             set("mana", FmtInt(r.mana))
-            -- Crit chance of the direct part (HoTs don't crit). Yellow = includes talents.
-            if r.direct > 0 and not r.absorb then
+            -- Crit chance (HoT ticks can crit in WoW Forever). Yellow = includes talents.
+            if r.canCrit then
                 local critCol = (not DB.crit and COLOR.grey) or (r.critAdd > 0 and COLOR.yellow) or nil
                 set("crit", ("%.1f%%"):format(r.critTotal), critCol)
             else

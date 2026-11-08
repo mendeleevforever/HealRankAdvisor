@@ -28,7 +28,7 @@ Penance (WoW Forever's Discipline talent) is read from its tooltip: one bolt ins
 
 ## Divine Aegis
 
-With Divine Aegis, every non-periodic critical heal also leaves a shield worth 5/10/15% of the heal. The addon adds the average value per cast: crit chance x crit heal (1.5x) x the talent's %. This applies to direct heals and Penance's bolts, not HoTs or Power Word: Shield. It is counted only while the Crit option is on, and the row tooltip shows how much it adds.
+With Divine Aegis, every non-periodic critical heal also leaves a shield worth 5/10/15% of the heal. The addon adds the average value per cast: crit chance x crit heal (1.5x) x the talent's %. This applies to direct heals and Penance's bolts. HoT crits don't trigger it (the talent says non-periodic), and neither does Power Word: Shield. It is counted only while the Crit option is on, and the row tooltip shows how much it adds.
 
 ## Minimap button
 
@@ -61,7 +61,7 @@ Columns: Spell, Rank, level learned, Bonus (share of your +healing the rank keep
 Options along the bottom:
 
 - **+Healing** — on by default (tooltips already include it). Untick to see each rank's base heal with your spell healing removed.
-- **Crit** — includes the average value of crits on the direct part of heals.
+- **Crit** — includes the average value of crits. In WoW Forever heals over time can crit too, so every HoT tick counts (Renew, Rejuvenation, Regrowth's HoT, Tranquility). Shields and totem heals don't crit.
 - **Group heals** — multiplies Prayer of Healing, Holy Nova, Tranquility, Chain Heal (1 + 0.5 + 0.25), etc. by the targets they hit.
 - **Untrained ranks** — also lists ranks your level allows but you haven't trained yet (in grey).
 - **HoT HPS by duration** — HoT HPS = heal / HoT duration (healing per second on the target) instead of heal / time spent casting (1.5 s GCD for instants).
@@ -109,7 +109,7 @@ Each effect is only applied if the game hasn't already applied it, so nothing is
 
 - **Healing %** is already in WoW Forever's tooltips (verified for Improved Renew). Once a spell's coefficient has been measured, the addon checks the tooltip actually contains the talent multiplier and applies it itself if it doesn't.
 - **Mana cost.** The game's spell cost already includes cost talents (verified in game: Lesser Heal rank 3 costs 64 mana with Improved Healing 3/3, which is 75 minus 15%). The addon uses the game's cost as-is and lists which talents lowered it when you hover a row.
-- **Crit.** The character sheet shows only your base spell crit. Talents are never included (verified in game: 6.9% with 0 and with 5 points in Holy Specialization). The addon adds every crit talent that applies to a spell on top. The **Crit** column shows each heal's crit chance (yellow = includes talents, "-" for HoTs), and the header shows your crit with talents.
+- **Crit.** The character sheet shows only your base spell crit. Talents are never included (verified in game: 6.9% with 0 and with 5 points in Holy Specialization). The addon adds every crit talent that applies to a spell on top. The **Crit** column shows each heal's crit chance, HoTs included (yellow = includes talents, "-" for shields and totems), and the header shows your crit with talents.
 
 `/hra talents` lists every talent effect found and whether mana cost talents are in the game's costs. Hover a row to see which talents affect that spell.
 
@@ -127,7 +127,7 @@ Each effect is only applied if the game hasn't already applied it, so nothing is
 
 ## Version
 
-1.2.4
+1.3.0
 
 ## Author
 
