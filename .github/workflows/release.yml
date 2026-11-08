@@ -1,4 +1,3 @@
-yaml
 name: Package and release
 on:
   push:
