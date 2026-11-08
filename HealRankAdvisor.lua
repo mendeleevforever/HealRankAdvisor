@@ -7,7 +7,7 @@ local HRA = {}
 _G.HealRankAdvisor = HRA
 ns.HRA = HRA
 
-local VERSION = "1.0.0"
+local VERSION = "1.2.4"
 local GCD     = 1.5
 local DB
 
@@ -308,6 +308,29 @@ function ns.ParseHeal(desc, requireHealWord)
         end
     end
 
+    -- Volleys: "...or 126 healing to an ally, instantly and every 1 sec for 2 sec" (Penance)
+    -- = one bolt now plus one per interval: 3 bolts over a 2 sec channel.
+    if not p.min and not p.hotTotal then
+        local iv, d = t:match("instantly and every (%d+) sec for (%d+) sec")
+        if iv and tonumber(iv) > 0 then
+            local lo, hi = t:match("(%d+) to (%d+) healing")
+            if not lo then lo = t:match("(%d+) healing"); hi = lo end
+            if lo then
+                local bolts = 1 + math.floor(tonumber(d) / tonumber(iv) + 0.001)
+                p.min, p.max = tonumber(lo) * bolts, tonumber(hi) * bolts
+                p.bolts, p.boltMin, p.boltMax = bolts, tonumber(lo), tonumber(hi)
+                p.dur = tonumber(d)                 -- channel time
+                p.tick, p.interval = nil, nil
+            end
+        end
+    end
+
+    -- Absorb shields: "absorbing 48 damage" (Power Word: Shield)
+    if not p.min and not p.hotTotal and not p.tick then
+        local n = t:match("absorbing (%d+) damage") or t:match("absorbs? (%d+) damage")
+        if n then p.min, p.max, p.absorb = tonumber(n), tonumber(n), true end
+    end
+
     if p.min or p.hotTotal or p.tick then return p end
     return nil
 end
@@ -368,8 +391,17 @@ function ns.ParseTalentText(text, mods, src)
         local conditional = clause:find("when activated") or clause:find("your next") or clause:find(" when cast on")
             or clause:find("after ") or clause:find("chance to ")
 
+        -- Crit shields: "Your non-periodic critical heals create a protective shield on the
+        -- target, absorbing 15% of the amount healed" (Divine Aegis)
+        if clause:find("critical heal") and clause:find("absorb") then
+            local pct = Pct(clause:match("absorbing ([%d%.]+)%%"))
+            if pct and pct > 0 then
+                AddMod(mods.aegis, "*", pct, src)
+                found = true
+            end
+
         -- Mana cost: "Reduces the mana cost of your Smite, Holy Fire, and instant cast spells by 9%"
-        if clause:find("mana cost") and (clause:find("reduc") or clause:find("decreas") or clause:find("lower"))
+        elseif clause:find("mana cost") and (clause:find("reduc") or clause:find("decreas") or clause:find("lower"))
            and not conditional then
             local chunk, pct = clause:match("mana cost of (.-) by ([%d%.]+)%%")
             pct = Pct(pct)
@@ -390,9 +422,11 @@ function ns.ParseTalentText(text, mods, src)
 
         -- Healing %: "Increases the amount healed by your Renew spell by 15%",
         -- "...damage and healing of your instant cast spells by 5%", "...effect of your Rejuvenation spell by 15%"
-        elseif clause:find("increas") and (clause:find("heal") or clause:find("effect of your")) and not conditional
+        elseif clause:find("increas") and (clause:find("heal") or clause:find("effect of your") or clause:find("absorb"))
+               and not conditional
                and not clause:find("duration") then
             local chunk, pct = clause:match("healed by (.-) by ([%d%.]+)%%")
+            if not chunk then chunk, pct = clause:match("absorbed by (your .-) by ([%d%.]+)%%") end
             if not chunk then chunk, pct = clause:match("effect of (your .-) by ([%d%.]+)%%") end
             if not chunk then chunk, pct = clause:match("healing done by (.-) by ([%d%.]+)%%") end
             if not chunk then chunk, pct = clause:match("healing of (.-) by ([%d%.]+)%%") end
@@ -425,7 +459,7 @@ function ns.ParseTalentText(text, mods, src)
 end
 
 -- Sum of a talent effect that applies to a spell: its own name plus matching categories.
-local function Applicable(tbl, def, isInstant, school, categoriesOnly)
+local function Applicable(tbl, def, isInstant, school, namedOnly)
     local total, srcs, schoolWide = 0, {}, 0
     local function take(key, isSchool)
         local m = tbl and tbl[key]
@@ -435,6 +469,7 @@ local function Applicable(tbl, def, isInstant, school, categoriesOnly)
         for _, sname in ipairs(m.sources) do srcs[#srcs + 1] = sname end
     end
     take(def.lname)
+    if namedOnly then return total, table.concat(srcs, ", "), schoolWide end
     take("*")
     if isInstant then take("@instant") end
     if school == 2 then take("@holy", true) end
@@ -638,7 +673,7 @@ local function TalentText(t)
 end
 
 function HRA:GetTalentMods(talents)
-    local mods = { cast = {}, dur = {}, heal = {}, cost = {}, crit = {} }
+    local mods = { cast = {}, dur = {}, heal = {}, cost = {}, crit = {}, aegis = {} }
     talents = talents or self.talents or self:ReadTalents()
     for _, t in ipairs(talents) do
         local name, rank = t.name, t.rank
@@ -658,6 +693,7 @@ function HRA:GetTalentMods(talents)
             for sp, v in pairs(fb.heal or {}) do AddMod(mods.heal, sp, v * mult, src .. "*") end
             for sp, v in pairs(fb.cost or {}) do AddMod(mods.cost, sp, v * mult, src .. "*") end
             for sp, v in pairs(fb.crit or {}) do AddMod(mods.crit, sp, v * mult, src .. "*") end
+            for sp, v in pairs(fb.aegis or {}) do AddMod(mods.aegis, sp, v * mult, src .. "*") end
         end
     end
     return mods
@@ -693,10 +729,24 @@ function HRA:BuildEntries()
     -- 1) Every rank in the data table (finds untrained ranks too)
     for _, def in ipairs(defs) do
         for ri, r in ipairs(def.ranks) do
-            local nm = SpellName(r[1])
+            local id = r[1]
+            if type(id) == "table" then
+                -- Several spells share the name (e.g. Penance's hidden bolt spells):
+                -- take the first candidate whose tooltip actually reads as a heal.
+                local pick
+                for _, cand in ipairs(id) do
+                    local cn = SpellName(cand)
+                    if cn and cn:lower() == def.lname and ns.ParseHeal(SpellDesc(cand), false) then
+                        pick = cand
+                        break
+                    end
+                end
+                id = pick
+            end
+            local nm = id and SpellName(id)
             if nm and nm:lower() == def.lname then
-                add({ id = r[1], def = def, rank = ri, level = LearnLevel(r[1], r[2]),
-                      baseCast = r[3], known = Known(r[1]) })
+                add({ id = id, def = def, rank = ri, level = LearnLevel(id, r[2]),
+                      baseCast = r[3], known = Known(id) })
             end
         end
     end
@@ -756,18 +806,53 @@ end
 -- Remembers each rank's tooltip value at the lowest and highest +healing seen
 -- (same level and talents). Once they are 20+ apart, the slope is the rank's
 -- true +healing coefficient including talents and the downranking penalty.
-function HRA:LearnSlope(id, level, sig, sp, value)
+-- `expected` = the estimated +healing per point in the tooltip. It is only used to
+-- throw away readings that can't be right:
+--   * the spell-healing number changed but the tooltip didn't (the game hadn't
+--     updated the tooltip yet, e.g. right after swapping gear), or
+--   * the tooltip went DOWN as spell healing went up, or rose impossibly fast
+--     (a temporary buff such as Power Infusion was active for one of the readings).
+local function PlausibleSlope(slope, dsp, expected)
+    local tol = 2 / dsp                       -- tooltips round to whole numbers
+    if slope < -tol then return false end
+    if expected >= 0.1 and expected * dsp > 4 and math.abs(slope) <= tol then return false end
+    if slope > math.max(1.6, expected * 2.5) then return false end
+    return true
+end
+
+function HRA:LearnSlope(id, level, sig, sp, value, expected)
     DB.samples = DB.samples or {}
+    expected = expected or 0
     local s = DB.samples[id]
     if not s or s.lvl ~= level or s.sig ~= sig then
-        s = { lvl = level, sig = sig, lo = { sp, value }, hi = { sp, value } }
-        DB.samples[id] = s
-    else
-        if sp < s.lo[1] then s.lo = { sp, value } elseif sp == s.lo[1] then s.lo[2] = value end
-        if sp > s.hi[1] then s.hi = { sp, value } elseif sp == s.hi[1] then s.hi[2] = value end
+        DB.samples[id] = { lvl = level, sig = sig, lo = { sp, value }, hi = { sp, value } }
+        return nil
+    end
+    -- Only accept a new low/high reading if it agrees with the reading at the other end
+    local function ok(other)
+        local dsp = sp - other[1]
+        if math.abs(dsp) < 20 then return true end
+        return PlausibleSlope((value - other[2]) / dsp, math.abs(dsp), expected)
+    end
+    if sp < s.lo[1] then
+        if ok(s.hi) then s.lo = { sp, value } end
+    elseif sp == s.lo[1] and ok(s.hi) then
+        s.lo[2] = value
+    end
+    if sp > s.hi[1] then
+        if ok(s.lo) then s.hi = { sp, value } end
+    elseif sp == s.hi[1] and ok(s.lo) then
+        s.hi[2] = value
     end
     local dsp = s.hi[1] - s.lo[1]
-    if dsp >= 20 then return (s.hi[2] - s.lo[2]) / dsp, s.lo[1], s.hi[1] end
+    if dsp < 20 then return nil end
+    local slope = (s.hi[2] - s.lo[2]) / dsp
+    if not PlausibleSlope(slope, dsp, expected) then
+        -- The stored readings disagree with each other: start over from this one
+        DB.samples[id] = { lvl = level, sig = sig, lo = { sp, value }, hi = { sp, value } }
+        return nil
+    end
+    return math.max(slope, 0), s.lo[1], s.hi[1]
 end
 
 function HRA:ComputeEntry(e, mods, sig, bonus, critPct, playerLevel)
@@ -867,7 +952,8 @@ function HRA:ComputeEntry(e, mods, sig, bonus, critPct, playerLevel)
     local ctx       = self.ctx or {}
     local school    = ctx.school or 2
     local isInstant = castNow <= 0 and not def.channel
-    local healPct, healSrc = Applicable(mods.heal, def, isInstant, school)
+    -- Shields only get talents that name them (e.g. Improved Power Word: Shield)
+    local healPct, healSrc = Applicable(mods.heal, def, isInstant, school, def.absorb)
     local costPct, costSrc = Applicable(mods.cost, def, isInstant, school)
     local critTal, critSrc, critSchoolWide = Applicable(mods.crit, def, isInstant, school)
     local M = 1 + healPct / 100
@@ -878,7 +964,8 @@ function HRA:ComputeEntry(e, mods, sig, bonus, critPct, playerLevel)
     -- The addon only works out the +healing portion, to show it or remove it.
     local formulaShare = ns.DownrankShare(playerLevel, e.level)
     local share = formulaShare
-    local slope, sLo, sHi = self:LearnSlope(e.id, playerLevel, sig, bonus, direct + hot)
+    local expectedPerSP = (cd + ch) * formulaShare * M
+    local slope, sLo, sHi = self:LearnSlope(e.id, playerLevel, sig, bonus, direct + hot, expectedPerSP)
 
     -- Is the talent healing % already in the tooltip? Assumed yes (verified in game for
     -- Improved Renew). Confirmed per spell once a rank that keeps its full +healing has
@@ -887,9 +974,10 @@ function HRA:ComputeEntry(e, mods, sig, bonus, critPct, playerLevel)
     local healIncluded, healVerified = true, false
     local hm = DB.healMode[def.lname]
     if hm and hm.sig == sig then healIncluded, healVerified = (hm.mode == "included"), true end
-    if slope and M > 1.005 and formulaShare >= 0.999 and (cd + ch) > 0 and math.abs(slope) >= 0.02 then
+    if slope and M > 1.005 and formulaShare >= 0.999 and (cd + ch) > 0 and slope >= 0.02 then
         local ratio = slope / (cd + ch)
-        healIncluded = math.abs(ratio - M) <= math.abs(ratio - 1)
+        -- "missing" only when the measurement clearly sits at the untalented value
+        healIncluded = not (math.abs(ratio - 1) < math.abs(ratio - M) and ratio > 0.8 and ratio < 1.2)
         healVerified = true
         DB.healMode[def.lname] = { mode = healIncluded and "included" or "missing", sig = sig }
     end
@@ -901,21 +989,19 @@ function HRA:ComputeEntry(e, mods, sig, bonus, critPct, playerLevel)
     local perD, perH = estD, estH
     local includes, measured = true, false
     local fullCoef = (cd + ch) * mult
+    -- WoW Forever's tooltips always include +healing (verified in game), so a
+    -- measurement only refines how much of the tooltip is +healing.
     if slope then
         measured = true
-        if math.abs(slope) < 0.02 and fullCoef * share > 0.05 then
-            includes = false              -- tooltip didn't move with +healing: add it ourselves
+        local est = estD + estH
+        if est > 0 then
+            perD, perH = estD * slope / est, estH * slope / est
         else
-            local est = estD + estH
-            if est > 0 then
-                perD, perH = estD * slope / est, estH * slope / est
-            else
-                local sum = direct + hot
-                perD = sum > 0 and slope * direct / sum or 0
-                perH = sum > 0 and slope * hot / sum or 0
-            end
-            if fullCoef > 0 then share = Clamp(slope / fullCoef, 0, 1.5) end
+            local sum = direct + hot
+            perD = sum > 0 and slope * direct / sum or 0
+            perH = sum > 0 and slope * hot / sum or 0
         end
+        if fullCoef > 0 then share = Clamp(slope / fullCoef, 0, 1.5) end
     end
     local bD, bH = perD * bonus, perH * bonus
     local directBase = includes and math.max(direct - bD, 0) or direct
@@ -929,9 +1015,20 @@ function HRA:ComputeEntry(e, mods, sig, bonus, critPct, playerLevel)
     local critAdd   = critTal
     local critTotal = Clamp(critPct + critAdd, 0, 100)
     local critMult = 1
-    if DB.crit and direct > 0 then critMult = 1 + (critTotal / 100) * 0.5 end
+    if DB.crit and direct > 0 and not def.absorb then critMult = 1 + (critTotal / 100) * 0.5 end
 
-    local directAvg = (directBase + (DB.bonus and bD or 0)) * extraMult * critMult
+    local directNoCrit = (directBase + (DB.bonus and bD or 0)) * extraMult
+    local directAvg = directNoCrit * critMult
+
+    -- Divine Aegis: non-periodic crits also leave a shield worth X% of the crit heal.
+    -- Expected extra = chance to crit x crit heal (1.5x) x X%. Counted with the Crit option.
+    local aegisPct = (mods.aegis and mods.aegis["*"] and mods.aegis["*"].amount) or 0
+    local aegisSrc = aegisPct > 0 and table.concat(mods.aegis["*"].sources, ", ") or nil
+    local aegis = 0
+    if DB.crit and aegisPct > 0 and direct > 0 and not def.absorb then
+        aegis = directNoCrit * (critTotal / 100) * 1.5 * (aegisPct / 100)
+        directAvg = directAvg + aegis
+    end
     local hotAvg    = (hotBase + (DB.bonus and bH or 0)) * durScale * extraMult
     hot = hot * durScale
     local perTarget = directAvg + hotAvg
@@ -955,6 +1052,7 @@ function HRA:ComputeEntry(e, mods, sig, bonus, critPct, playerLevel)
     local mana = clientCost
 
     row.castNow, row.cast = castNow, cast
+    row.absorb = def.absorb
     row.channel, row.totem = def.channel, def.totem
     row.ttDur, row.effDur, row.durSrc = ttDur, (hot > 0) and effDur or nil, durSrc
     row.direct, row.hot, row.bD, row.bH = direct, hot, bD, bH
@@ -970,6 +1068,8 @@ function HRA:ComputeEntry(e, mods, sig, bonus, critPct, playerLevel)
     row.spellHealing = bonus
     row.playerLevel = playerLevel
     row.critMult, row.critPct = critMult, critTotal
+    row.aegis, row.aegisPct, row.aegisSrc = aegis, aegisPct, aegisSrc
+    row.bolts, row.cooldown = p.bolts, def.cooldown
     row.tf, row.factor = tf, factor
     row.time, row.mana, row.total = time, mana, total
     row.directAvg, row.hotAvg = directAvg, hotAvg
@@ -1088,7 +1188,19 @@ local function RowOnEnter(self)
     if r.castNote then GT:AddLine("  " .. r.castNote, 1, 0.9, 0.3, true) end
     if r.direct > 0 then
         local p = r.parsed
-        GT:AddDoubleLine("Direct (tooltip):", ("%d - %d  (avg %s)"):format(p.min, p.max, FmtInt(r.direct)), 0.8, 0.8, 0.8, 1, 1, 1)
+        if r.bolts then
+            local p2 = r.parsed
+            local bolt = (p2.boltMin == p2.boltMax) and tostring(p2.boltMin) or ("%d - %d"):format(p2.boltMin, p2.boltMax)
+            GT:AddDoubleLine("Bolts (tooltip):", ("%d x %s = %s"):format(r.bolts, bolt, FmtInt(r.direct)), 0.8, 0.8, 0.8, 1, 1, 1)
+            GT:AddLine("  each bolt can crit; the channel can be cut short by moving", 0.6, 0.6, 0.6, true)
+        elseif r.absorb then
+            GT:AddDoubleLine("Absorb (tooltip):", FmtInt(r.direct), 0.8, 0.8, 0.8, 1, 1, 1)
+            GT:AddLine("  a damage shield, not a heal: it never crits or overheals,", 0.6, 0.6, 0.6, true)
+            GT:AddLine("  but only counts if the target takes that much damage", 0.6, 0.6, 0.6, true)
+            GT:AddLine("  Weakened Soul: same target can't be shielded again for 15 sec", 0.6, 0.6, 0.6, true)
+        else
+            GT:AddDoubleLine("Direct (tooltip):", ("%d - %d  (avg %s)"):format(p.min, p.max, FmtInt(r.direct)), 0.8, 0.8, 0.8, 1, 1, 1)
+        end
     end
     if r.hot > 0 then
         local label = r.channel and "Channel heal:" or (r.totem and "Totem heal:" or "HoT:")
@@ -1133,7 +1245,7 @@ local function RowOnEnter(self)
             end
         end
     end
-    if DB.crit and r.direct > 0 then
+    if DB.crit and r.direct > 0 and not r.absorb then
         GT:AddDoubleLine("Crit:", ("%.1f%%  (x%.3f on direct part)"):format(r.critTotal, r.critMult), 0.8, 0.8, 0.8, 1, 1, 1)
         if r.critTal > 0 then
             GT:AddLine(("  %.1f%% character sheet + %s%% talents (%s)"):format(r.critClient, FmtSec(r.critAdd), r.critSrc), 0.6, 0.6, 0.6, true)
@@ -1154,11 +1266,23 @@ local function RowOnEnter(self)
         GT:AddDoubleLine("Talent mana cost:", ("-%s%%"):format(FmtSec(r.costPct)), 0.8, 0.8, 0.8, 1, 1, 1)
         GT:AddLine(("  already in the game's mana cost  (%s)"):format(r.costSrc), 0.6, 0.6, 0.6, true)
     end
+    if r.aegisPct and r.aegisPct > 0 and r.direct > 0 and not r.absorb then
+        if DB.crit then
+            GT:AddDoubleLine("Divine Aegis:", ("+%s absorb  (%s%% of crits)"):format(FmtSec(math.floor(r.aegis * 10 + 0.5) / 10), FmtSec(r.aegisPct)),
+                0.8, 0.8, 0.8, 0.6, 1, 0.6)
+            GT:AddLine(("  average shield per cast: crit chance x crit heal x %s%%  (%s)"):format(FmtSec(r.aegisPct), r.aegisSrc or ""), 0.6, 0.6, 0.6, true)
+        else
+            GT:AddLine("  Divine Aegis not counted (Crit option off)", 0.6, 0.6, 0.6)
+        end
+    end
+    if r.cooldown then
+        GT:AddDoubleLine("Cooldown:", ("%ss"):format(FmtSec(r.cooldown)), 0.8, 0.8, 0.8, 1, 1, 1)
+    end
     if r.tf > 1 then
         GT:AddDoubleLine("Targets:", DB.group and ("x%s (group heals on)"):format(FmtSec(r.tf)) or "1 (group heals off)", 0.8, 0.8, 0.8, 1, 1, 1)
     end
     GT:AddLine(" ")
-    GT:AddDoubleLine("Average heal:", FmtInt(r.total), 1, 0.82, 0, 1, 1, 1)
+    GT:AddDoubleLine(r.absorb and "Average absorb:" or "Average heal:", FmtInt(r.total), 1, 0.82, 0, 1, 1, 1)
     GT:AddDoubleLine("Mana:", FmtInt(r.mana), 1, 0.82, 0, 1, 1, 1)
     GT:AddDoubleLine("HPS:", r.hps and ("%.1f  (over %ss)"):format(r.hps, FmtSec(r.time)) or "-", 1, 0.82, 0, 1, 1, 1)
     GT:AddDoubleLine("HPM:", r.hpm and ("%.2f"):format(r.hpm) or "-", 1, 0.82, 0, 1, 1, 1)
@@ -1549,6 +1673,7 @@ function HRA:Render()
             nameText = r.name
             if r.tf and r.tf > 1 and DB.group then nameText = nameText .. ("  |cff9c8d70x%s|r"):format(FmtSec(r.tf)) end
             if r.e.def.auto then nameText = nameText .. " |cff9c8d70(auto)|r" end
+            if r.e.def.absorb then nameText = nameText .. " |cff9c8d70(absorb)|r" end
         end
         set("name", nameText, COLOR.gold)
         set("rank", (r.rank and r.rank > 0) and tostring(r.rank) or "-")
@@ -1575,7 +1700,7 @@ function HRA:Render()
             set("dur", (r.effDur and not r.channel) and (FmtSec(r.effDur) .. "s") or "-", durCol)
             set("mana", FmtInt(r.mana))
             -- Crit chance of the direct part (HoTs don't crit). Yellow = includes talents.
-            if r.direct > 0 then
+            if r.direct > 0 and not r.absorb then
                 local critCol = (not DB.crit and COLOR.grey) or (r.critAdd > 0 and COLOR.yellow) or nil
                 set("crit", ("%.1f%%"):format(r.critTotal), critCol)
             else
@@ -1766,6 +1891,7 @@ local function SlashHandler(msg)
         for sp, m in pairs(mods.heal) do any = true; print(("  %s: healing +%s%%  (%s)"):format(CAT[sp] or sp, FmtSec(m.amount), table.concat(m.sources, ", "))) end
         for sp, m in pairs(mods.cost) do any = true; print(("  %s: mana cost -%s%%  (%s)"):format(CAT[sp] or sp, FmtSec(m.amount), table.concat(m.sources, ", "))) end
         for sp, m in pairs(mods.crit) do any = true; print(("  %s: crit +%s%%  (%s)"):format(CAT[sp] or sp, FmtSec(m.amount), table.concat(m.sources, ", "))) end
+        for _, m in pairs(mods.aegis) do any = true; print(("  critical heals: shield for %s%% of the heal  (%s)"):format(FmtSec(m.amount), table.concat(m.sources, ", "))) end
         print("  (mana cost talents are already included in the game's spell costs)")
         if not any then print("  none") end
         print("  (* = read from the addon's fallback table instead of the talent tooltip)")
@@ -1830,6 +1956,12 @@ local function OnEvent(self, event, ...)
         DB = HealRankAdvisorCharDB
         for k, v in pairs(DEFAULTS) do
             if DB[k] == nil then DB[k] = (type(v) == "table") and {} or v end
+        end
+        -- Measurements stored by versions before 1.2.4 weren't checked for stale
+        -- tooltips and could be wrong: start them over once.
+        if (DB.dataVersion or 0) < 2 then
+            DB.samples, DB.healMode = {}, {}
+            DB.dataVersion = 2
         end
         self:UnregisterEvent("ADDON_LOADED")
         Safe(HRA.SetupMinimapButton, HRA)

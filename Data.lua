@@ -9,6 +9,7 @@
 --     +healing; coefficients are only used to show or remove that portion).
 --
 -- Rank tuple: { spellID, learnLevel, baseCastSeconds }
+-- spellID may be a list of candidate IDs: the first whose tooltip reads as a heal is used.
 -- (learnLevel is only a fallback; the client is asked first.)
 
 local ADDON_NAME, ns = ...
@@ -28,6 +29,8 @@ ns.SCHOOL_NAME  = { [2] = "Holy", [4] = "Nature" }
 --   totem       totem: periodic healing over the totem's lifetime
 --   targets     fixed number of targets when "Group heals" is enabled
 --   targetsDefault  used only when the tooltip doesn't state the target count
+--   absorb      damage shield (Power Word: Shield): never crits; only talents that name it apply
+--   cooldown    seconds, shown in the row tooltip
 ns.SPELLS = {
     PRIEST = {
         { name = "Lesser Heal", coef = "cast",
@@ -42,6 +45,19 @@ ns.SPELLS = {
         { name = "Renew", hot = true, baseDur = 15, coefHot = 1.0,
           ranks = { {139,8}, {6074,14}, {6075,20}, {6076,26}, {6077,32}, {6078,38},
                     {10927,44}, {10928,50}, {10929,56}, {25315,60} } },
+        -- Not a heal: an absorb shield. Listed so it can be compared on HPS/HPM.
+        -- (Coefficient is the original game's 10%; measured from your tooltips once available.)
+        { name = "Power Word: Shield", absorb = true, coef = 0.1,
+          ranks = { {17,6}, {592,12}, {600,18}, {3747,24}, {6065,30}, {6066,36},
+                    {10898,42}, {10899,48}, {10900,54}, {10901,60} } },
+        -- WoW Forever talent (Discipline, 20 points): 3 bolts over a 2 sec channel, 12 sec cooldown.
+        -- Rank 1 from the talent at 30, ranks 2-4 from the trainer at 40/50/60.
+        -- IDs confirmed in game: 402174 (rank 1), 1240720 (rank 2), 1240721 (rank 3),
+        -- 1316995 (rank 4). Other spells share the name "Penance" (and even "Rank 4") - the
+        -- hidden bolt spells, e.g. 1316991 "Healing for 466 every 1 sec for 2 sec" and
+        -- 1316993 "Dealing 105 Holy damage every 1 sec" - so only the castable IDs are listed.
+        { name = "Penance", channel = true, baseDur = 2, coef = 2.0 / 3.5, cooldown = 12,
+          ranks = { {402174,30}, {1240720,40}, {1240721,50}, {1316995,60} } },
         { name = "Prayer of Healing", targets = 5, coef = 3.0 / 3.5 / 3,
           ranks = { {596,30,3.0}, {996,40,3.0}, {10960,50,3.0}, {10961,60,3.0}, {25316,60,3.0} } },
         { name = "Holy Nova", targets = 5, coef = 1.5 / 3.5 / 3,
@@ -112,6 +128,9 @@ ns.TALENT_FALLBACK = {
     ["Naturalist"]             = { perRank = true, cast = { ["healing touch"] = 0.1 } },
     -- Healing %
     ["Improved Renew"]         = { perRank = true, heal = { ["renew"] = 5 } },
+    ["Improved Power Word: Shield"] = { perRank = true, heal = { ["power word: shield"] = 5 } },
+    -- Crit shields
+    ["Divine Aegis"]           = { perRank = true, aegis = { ["*"] = 5 } },
     ["Spiritual Healing"]      = { perRank = true, heal = { ["*"] = 3 } },
     ["Twin Disciplines"]       = { perRank = true, heal = { ["@instant"] = 1 } },
     ["Improved Rejuvenation"]  = { perRank = true, heal = { ["rejuvenation"] = 5 } },
@@ -120,7 +139,8 @@ ns.TALENT_FALLBACK = {
     ["Purification"]           = { perRank = true, heal = { ["*"] = 2 } },
     -- Mana cost %
     ["Mental Agility"]         = { perRank = true, cost = { ["@instant"] = 3 } },
-    ["Improved Healing"]       = { perRank = true, cost = { ["lesser heal"] = 5, ["heal"] = 5, ["greater heal"] = 5 } },
+    ["Improved Healing"]       = { perRank = true, cost = { ["lesser heal"] = 5, ["heal"] = 5, ["greater heal"] = 5,
+                                                         ["penance"] = 5, ["prayer of mending"] = 5 } },
     ["Tranquil Spirit"]        = { perRank = true, cost = { ["healing touch"] = 2, ["tranquility"] = 2 } },
     ["Moonglow"]               = { perRank = true, cost = { ["healing touch"] = 3, ["regrowth"] = 3, ["rejuvenation"] = 3 } },
     ["Tidal Focus"]            = { perRank = true, cost = { ["*"] = 1 } },
@@ -137,7 +157,7 @@ ns.AUTO_BLACKLIST = {
     ["first aid"] = true, ["mend pet"] = true, ["health funnel"] = true,
     ["drain life"] = true, ["drain soul"] = true, ["siphon life"] = true,
     ["death coil"] = true, ["cannibalize"] = true, ["lay on hands"] = true,
-    ["swiftmend"] = true, ["power word: shield"] = true, ["frenzied regeneration"] = true,
+    ["swiftmend"] = true, ["frenzied regeneration"] = true,
     ["lifeblood"] = true, ["vampiric embrace"] = true, ["devouring plague"] = true,
     ["victory rush"] = true, ["bloodthirst"] = true, ["seal of light"] = true,
     ["judgement of light"] = true, ["judgement"] = true, ["blessing of light"] = true,

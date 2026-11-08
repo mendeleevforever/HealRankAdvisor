@@ -18,6 +18,18 @@ Copy the `HealRankAdvisor/` folder into your WoW Forever `Interface/AddOns/` dir
 | `/hra minimap` | Show or hide the minimap button |
 | `/hra help` | Show help |
 
+## Power Word: Shield
+
+Power Word: Shield is listed with the priest heals even though it absorbs damage instead of healing, so it can be compared on HPS and HPM. Its row is marked "(absorb)": the amount comes from the tooltip ("absorbing N damage"), it never crits (Crit shows "-"), and only talents that name it apply (e.g. Improved Power Word: Shield). General healing talents don't. Remember the shield only counts if the target actually takes that much damage, and Weakened Soul stops the same target being shielded again for 15 sec.
+
+## Penance
+
+Penance (WoW Forever's Discipline talent) is read from its tooltip: one bolt instantly and one every second of a 2 sec channel, so 3 bolts. Avg Heal is all three bolts, HPS uses the 2 sec channel, and each bolt can crit. The row tooltip also shows its 12 sec cooldown. Rank 1 comes from the talent; ranks 2-4 appear (in grey until trained) once your level allows them.
+
+## Divine Aegis
+
+With Divine Aegis, every non-periodic critical heal also leaves a shield worth 5/10/15% of the heal. The addon adds the average value per cast: crit chance x crit heal (1.5x) x the talent's %. This applies to direct heals and Penance's bolts, not HoTs or Power Word: Shield. It is counted only while the Crit option is on, and the row tooltip shows how much it adds.
+
 ## Minimap button
 
 A minimap button with the Lightwell icon (spell_holy_summonlightwell, icon 135980) opens the table:
@@ -65,7 +77,7 @@ It still works out the +healing portion of each heal, to show it in the **Bonus*
 
 The original game's below-level-20 penalty is not used. It does not exist in WoW Forever: Heal rank 1 (learned at 16) and Renew rank 2 (learned at 14) keep their full coefficient. The downranking formula matched the in-game tooltips for 9 of 10 ranks tested. Lesser Heal rank 1 kept about 24% where the formula predicts 40%, which is why measured values take priority.
 
-If the tooltip doesn't change at all with spell healing, the addon concludes that tooltip excludes +healing and adds the estimate itself.
+Readings that can't be right are thrown away: a spell healing change the tooltip hasn't caught up with yet (right after swapping gear), a tooltip that goes down as spell healing goes up, or one inflated by a temporary buff.
 
 ## How talents are handled
 
@@ -115,7 +127,7 @@ Each effect is only applied if the game hasn't already applied it, so nothing is
 
 ## Version
 
-1.0.0
+1.2.4
 
 ## Author
 
