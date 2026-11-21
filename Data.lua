@@ -1,3 +1,5 @@
+local addonName, ns = ...
+
 -- HealRankAdvisor / Data.lua
 -- Static data. Everything here is a *fallback or hint*: the addon reads live
 -- values (heal amounts, HoT durations, cast times, mana costs) from the game
@@ -5,14 +7,12 @@
 --   * find every rank of a spell (including ranks you haven't trained yet),
 --   * know the BASE cast time / duration of a spell so it can tell whether a
 --     talent bonus is already included in the client's numbers or not,
---   * look up +healing coefficients (WoW Forever tooltips already include your
---     +healing; coefficients are only used to show or remove that portion).
+--   * estimate healing power coefficients until they have been measured from
+--     your tooltips (WoW Forever tooltips already include your healing power).
 --
 -- Rank tuple: { spellID, learnLevel, baseCastSeconds }
 -- spellID may be a list of candidate IDs: the first whose tooltip reads as a heal is used.
 -- (learnLevel is only a fallback; the client is asked first.)
-
-local ADDON_NAME, ns = ...
 
 -- Spell school used for crit chance (2 = Holy, 4 = Nature)
 ns.CLASS_SCHOOL = { PRIEST = 2, PALADIN = 2, DRUID = 4, SHAMAN = 4 }

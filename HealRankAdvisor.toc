@@ -1,11 +1,16 @@
 ## Interface: 16001
 ## Title: Heal Rank Advisor
-## Notes: Healing per Second and Healing per Mana for every healing spell rank you can use
+## Notes: HPS, HPM, healing power coefficient and base heal for every healing spell rank you can use
 ## Author: MendeleevForever
-## Version: 1.3.0
+## Version: 1.4.0
+## Category: Healer
 ## IconTexture: 135980
 ## X-Curse-Project-ID: 1762670
+## SavedVariables: HealRankAdvisorDB
 ## SavedVariablesPerCharacter: HealRankAdvisorCharDB
+## AddonCompartmentFunc: HealRankAdvisor_OnAddonCompartmentClick
+## AddonCompartmentFuncOnEnter: HealRankAdvisor_OnAddonCompartmentEnter
+## AddonCompartmentFuncOnLeave: HealRankAdvisor_OnAddonCompartmentLeave
 ## OptionalDeps: LibStub, CallbackHandler-1.0, LibDataBroker-1.1, LibDBIcon-1.0
 ## X-Embeds: LibStub, CallbackHandler-1.0, LibDataBroker-1.1, LibDBIcon-1.0
 

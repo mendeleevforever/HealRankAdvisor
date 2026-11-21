@@ -1,142 +1,161 @@
 # Heal Rank Advisor
 
-A table of every healing spell rank available to your character, with average **Healing per Second (HPS)** and **Healing per Mana (HPM)**, so you can pick the right rank to downrank to.
+**Which rank of my heal should I cast?** Heal Rank Advisor answers that with one table. It lists every rank of every healing spell your character can use, shows how much each one heals per second and per point of mana, and works out each rank's healing power coefficient and base heal, using your gear, talents and level.
 
-## Installation
+Made for **WoW Forever**.
 
-Copy the `HealRankAdvisor/` folder into your WoW Forever `Interface/AddOns/` directory, then `/reload`.
+---
+
+## Getting started
+
+1. Copy the `HealRankAdvisor` folder into your WoW Forever `Interface/AddOns` folder (the same place as your other addons).
+2. Start the game, or type `/reload` if you're already in.
+3. Click the **Lightwell** icon on your minimap, pick **Heal Rank Advisor** from the addon list button next to the minimap, or type **`/hra`**.
+
+That's it. The table works straight away.
+
+---
+
+## Reading the table
+
+Each spell gets its own block, with one row per rank.
+
+| Column | What it means |
+|---|---|
+| **Spell / Rank** | The spell and its rank. Grey rows are ranks your level allows but that you haven't trained yet. |
+| **Lvl** | The level the rank is learned at. |
+| **Coef** | The rank's **healing power coefficient**: how much extra it heals for each point of healing power. For example, 0.857 means 100 healing power adds about 86 healing. |
+| **Base** | The rank's **base heal**: what one cast heals with 0 healing power. |
+| **Cast** | Cast time. *Inst* = instant, *ch* = channelled. |
+| **HoT** | How long a heal over time lasts. |
+| **Mana** | Mana cost. |
+| **Crit** | Your chance to crit with this spell, talents included. |
+| **Avg Heal** | The average amount one cast heals with your gear, crits included. |
+| **HPS** | Healing per second: how fast the rank heals. |
+| **HPM** | Healing per mana: how efficient the rank is. |
+
+**HPS and HPM are colour-coded within each spell**, from red (that spell's lowest) through yellow to green (that spell's highest), across the ranks you know. This tells you at a glance which rank of *this* spell is fastest or most efficient. As a rule of thumb, a fast, high-HPS rank is for emergencies and a high-HPM rank is for long fights where mana matters.
+
+**Coef and Base marked with ~** are estimates. They become exact once the addon has measured them (see below).
+
+**Hover over any row** for the full breakdown: the spell's own tooltip, how much of the heal comes from your healing power, which talents affect it, crit details and more. **Hover a column header** for a short explanation of that column.
+
+**Click a column header** (Spell, Coef, Base, Mana, Avg Heal, HPS, HPM) to sort by it.
+
+### Colours in the Cast, HoT and Crit columns
+
+- **Normal** – straight from the game.
+- **Yellow** – a talent changed this value (for example Holy Specialization adding crit).
+- **Green** – confirmed by your own cast (see *Confirming HoT durations* below).
+
+---
+
+## The options
+
+The tick boxes along the bottom change how the numbers are worked out:
+
+- **Crit** – counts the average value of critical heals. In WoW Forever heals over time can crit too, so every HoT tick counts.
+- **Group heals** – multiplies heals like Prayer of Healing and Chain Heal by the number of people they hit.
+- **Untrained ranks** – also shows ranks you could train at your level (in grey). Handy for deciding whether a trip to the trainer is worth it.
+- **HoT HPS by duration** – for heals over time, shows healing per second on the target instead of healing per second of your casting time.
+
+Your options and the minimap button position are shared by all your characters.
+
+---
+
+## Keeping the table up to date
+
+To save performance, Heal Rank Advisor **does nothing in the background**. It only recalculates when you:
+
+- click **Refresh** (or right-click the minimap icon),
+- change one of the options, or
+- open it for the first time in a session.
+
+The top line shows when the numbers were last calculated, for example *"Updated 19:55"*. **Click Refresh after you level up, train new ranks, change talents or change gear.**
+
+---
+
+## Getting the most accurate numbers
+
+### Measuring coefficients and base heals
+
+Avg Heal, HPS and HPM are always exact, because they come straight from the game's tooltips. **Coef** and **Base** start as estimates (marked **~**). The addon measures them exactly by comparing your spell tooltips at two different amounts of healing power:
+
+1. Click **Refresh**.
+2. Take off an item with healing power, wait a second, and click **Refresh** again.
+3. Put the item back on and click **Refresh** once more.
+
+Once your healing power has changed by 20 or more, the **~** disappears for every rank. Each character keeps its own measurements. They start over automatically when you level up or change talents, because both change the numbers.
+
+### Confirming HoT durations
+
+Some talents make heals over time last longer. To confirm a HoT's real duration:
+
+1. Open the table.
+2. **Out of combat**, cast the HoT (for example Renew) on yourself.
+3. A chat message tells you how long it lasts. Click **Refresh** and its HoT value turns **green**.
+
+Do this once per rank. Respeccing clears the confirmation, since your talents may have changed.
+
+---
+
+## Good to know
+
+**Downranking.** In WoW Forever, once you are more than 17 levels above the level a rank is learned at, that rank's coefficient shrinks by 5% of its full value for every level, until it gets nothing from your healing power. That's why an old rank's **Coef** can be much lower than a newer rank's. Hovering a row tells you when that rank starts and stops fading.
+
+**Power Word: Shield** is listed with your heals so you can compare it, even though it absorbs damage instead of healing. It never crits, and remember it only counts if the target actually takes that much damage. Weakened Soul stops you shielding the same person again for 15 seconds.
+
+**Penance** fires 3 bolts over a 2-second channel. Its numbers cover all three bolts, and each bolt can crit. It has a 12-second cooldown.
+
+**Group heals.** Coef and Base are for one target. Avg Heal counts every target when **Group heals** is ticked.
+
+**Divine Aegis** is included: when it's talented, the average shield from your critical heals is added to each heal (shown when you hover a row).
+
+**Talents** are read automatically, including cast time, HoT duration, healing, mana cost and crit talents. Type `/hra talents` to see what was found. Effects that only happen sometimes (like Inner Focus or Illumination) aren't counted.
+
+**WoW Forever heals the addon doesn't know by name** are detected automatically and marked **(auto)**. Their Coef and Base are rough guesses until measured.
+
+---
+
+## The minimap button
+
+- **Left-click** – open or close the table.
+- **Right-click** – open the table and refresh it.
+- **Drag** – move the button around the minimap.
+
+Type `/hra minimap` to hide or show it. The addon list button next to the minimap works the same way, even with the minimap button hidden.
+
+---
 
 ## Commands
 
-| Command | Effect |
+| Command | What it does |
 |---|---|
-| `/hra` or `/healranks` | Toggle the table |
-| `/hra talents` | List your talents (and how they were read) plus every effect found on your heals |
-| `/hra debug` | Print the raw parsed values for every row (useful for bug reports) |
-| `/hra resetobs` | Forget learned HoT durations, mana costs and coefficient measurements |
-| `/hra errors` | Show caught errors in a window you can copy from |
-| `/hra minimap` | Show or hide the minimap button |
-| `/hra help` | Show help |
+| `/hra` | Open or close the table |
+| `/hra refresh` | Recalculate the table |
+| `/hra talents` | List your talents and what they change |
+| `/hra minimap` | Hide or show the minimap button |
+| `/hra resetobs` | Forget confirmed HoT durations and coefficient measurements |
+| `/hra errors` | Show any errors in a window you can copy from |
+| `/hra debug` | Print the raw numbers for every row (for bug reports) |
+| `/hra help` | List these commands |
 
-## Power Word: Shield
+---
 
-Power Word: Shield is listed with the priest heals even though it absorbs damage instead of healing, so it can be compared on HPS and HPM. Its row is marked "(absorb)": the amount comes from the tooltip ("absorbing N damage"), it never crits (Crit shows "-"), and only talents that name it apply (e.g. Improved Power Word: Shield). General healing talents don't. Remember the shield only counts if the target actually takes that much damage, and Weakened Soul stops the same target being shielded again for 15 sec.
+## Something wrong?
 
-## Penance
+- **A number looks off?** Click **Refresh** first. If you changed gear or talents since the last update, the table won't know yet.
+- **A message says an error was caught?** Type `/hra errors`, press **Ctrl+A** then **Ctrl+C** to copy everything, and include it in your bug report.
+- **Reporting a wrong value?** Hover the row and take a screenshot, and include the output of `/hra debug` if you can.
 
-Penance (WoW Forever's Discipline talent) is read from its tooltip: one bolt instantly and one every second of a 2 sec channel, so 3 bolts. Avg Heal is all three bolts, HPS uses the 2 sec channel, and each bolt can crit. The row tooltip also shows its 12 sec cooldown. Rank 1 comes from the talent; ranks 2-4 appear (in grey until trained) once your level allows them.
+### Known limitations
 
-## Divine Aegis
+- Only English game clients are supported, because the addon reads spell tooltips.
+- Effects that only trigger sometimes (Inner Focus, Illumination, Renewed Hope, Litany of Light) aren't included.
+- Coef and Base marked **~** are estimates until measured.
 
-With Divine Aegis, every non-periodic critical heal also leaves a shield worth 5/10/15% of the heal. The addon adds the average value per cast: crit chance x crit heal (1.5x) x the talent's %. This applies to direct heals and Penance's bolts. HoT crits don't trigger it (the talent says non-periodic), and neither does Power Word: Shield. It is counted only while the Crit option is on, and the row tooltip shows how much it adds.
+---
 
-## Minimap button
+**Version** 1.4.0 · **Author** MendeleevForever · **CurseForge project** 1762670
 
-A minimap button with the Lightwell icon (spell_holy_summonlightwell, icon 135980) opens the table:
-
-- **Left-click:** open or close the table (shows the last results).
-- **Right-click:** open the table and recalculate it, same as Refresh.
-- **Drag:** move the button around the minimap. Its position is saved per character.
-
-`/hra minimap` hides or shows the button. The button costs nothing while you aren't using it.
-
-## When the table updates
-
-The addon does nothing in the background. The table is calculated only when:
-
-- you open it for the first time in a session,
-- you click **Refresh**, or
-- you tick or untick one of the options.
-
-Re-opening the window shows the last results, and the top line shows the time they were calculated ("Updated 14:32"). Click Refresh after levelling, training, respeccing or changing gear. Sorting by a column only re-orders the existing rows.
-
-Learning HoT durations from your casts only listens while the window is open. Learned values appear the next time you click Refresh.
-
-Errors are caught instead of being shown on screen. The first one prints a single chat line, and `/hra errors` opens a window where you can select and copy them all.
-
-## The table
-
-Columns: Spell, Rank, level learned, Bonus (share of your +healing the rank keeps; ~ = estimated), Cast time, HoT duration, Mana, Crit, Average heal, HPS, HPM. HPS and HPM are colour-graded red → yellow → green across your trained ranks. Click the Spell, Mana, Avg Heal, HPS or HPM header to sort. Hover any row for a full breakdown including the spell's tooltip text.
-
-Options along the bottom:
-
-- **+Healing** — on by default (tooltips already include it). Untick to see each rank's base heal with your spell healing removed.
-- **Crit** — includes the average value of crits. In WoW Forever heals over time can crit too, so every HoT tick counts (Renew, Rejuvenation, Regrowth's HoT, Tranquility). Shields and totem heals don't crit.
-- **Group heals** — multiplies Prayer of Healing, Holy Nova, Tranquility, Chain Heal (1 + 0.5 + 0.25), etc. by the targets they hit.
-- **Untrained ranks** — also lists ranks your level allows but you haven't trained yet (in grey).
-- **HoT HPS by duration** — HoT HPS = heal / HoT duration (healing per second on the target) instead of heal / time spent casting (1.5 s GCD for instants).
-
-## How +healing is handled
-
-WoW Forever's spell tooltips **already include** your spell healing, the downranking penalty and healing talents like Improved Renew. This was verified in game on a level 30 priest at 16 and 151 spell healing. The addon therefore uses each rank's tooltip value as-is for Avg Heal, HPS and HPM.
-
-It still works out the +healing portion of each heal, to show it in the **Bonus** column and to remove it when the **+Healing** box is unticked:
-
-- **Measured (no ~).** The addon remembers every rank's tooltip at the lowest and highest spell healing it has seen at your current level and talents. Once those are 20+ apart (swap a healing item on and off once), the change in heal ÷ change in spell healing is the rank's exact coefficient.
-- **Estimated (~).** Until then it uses the vanilla coefficient (cast time / 3.5, HoT duration / 15) × talent healing % × WoW Forever's downranking share `1 - (L - 17 - T) x 0.05` (clamped 0-100%, L = your level, T = the rank's learn level).
-
-The original game's below-level-20 penalty is not used. It does not exist in WoW Forever: Heal rank 1 (learned at 16) and Renew rank 2 (learned at 14) keep their full coefficient. The downranking formula matched the in-game tooltips for 9 of 10 ranks tested. Lesser Heal rank 1 kept about 24% where the formula predicts 40%, which is why measured values take priority.
-
-Readings that can't be right are thrown away: a spell healing change the tooltip hasn't caught up with yet (right after swapping gear), a tooltip that goes down as spell healing goes up, or one inflated by a temporary buff.
-
-## How talents are handled
-
-**Cast time.** The game client's reported cast time already includes talents like Divine Fury, Improved Healing Wave, or Naturalist (and haste). The addon uses it directly. As a safety net, if a cast-time talent is detected but the client still reports the spell's untalented base cast time, the addon subtracts the talent itself and shows the cast in yellow.
-
-**HoT duration.** Durations come from three sources, best first:
-
-1. **Observed (green)** — whenever you cast a HoT, the addon reads the real duration off the aura you applied and remembers it per rank. This is always correct, whatever talents WoW Forever ends up having. Cast each HoT rank once to lock it in. Respeccing invalidates the stored values automatically.
-2. **Talent-adjusted (yellow)** — the addon reads your talent tooltips and understands text such as "Increases the duration of your Rejuvenation spell by 3 sec, your Regrowth spell by 6 sec" (Nature's Splendor). If the spell tooltip still shows the base duration, the bonus is added.
-3. **Tooltip (white)** — the spell tooltip's own duration.
-
-Extra HoT time adds extra ticks, so total HoT healing (and its +healing share) is scaled up with the duration.
-
-New WoW Forever talents worded in the usual "Reduces the cast time of your X spell by N sec" / "Increases the duration of your X spell by N sec" way are picked up automatically. `Data.lua` contains a small fallback table (`ns.TALENT_FALLBACK`) used only if a talent's tooltip can't be read.
-
-**How talents are read.** WoW Forever has no `GetNumTalentTabs` / `GetTalentInfo`. Its talent frame uses the modern trait system, so the addon reads your talents the same way: through `C_ClassTalents` and `C_Traits` (config → trees → nodes → rank and spell). Each talent's text comes from its trait tooltip at your current rank. The old Classic functions are still tried as a fallback on other clients. If a tooltip can't be read, the fallback table in `Data.lua` is used and marked with `*` in `/hra talents`.
-
-**Secret values.** Like Midnight, Forever can return "secret" values (for example your mana in combat) that addons can't compare. The cast-learning code checks for them and skips that cast instead of raising an error.
-
-**Healing %, mana cost and crit talents.** The addon reads every talent you have points in and understands wording such as:
-
-- "Increases the amount healed by your Renew spell by 15%" / "Increases the damage and healing of your instant cast spells by 5%" (Improved Renew, Twin Disciplines, Spiritual Healing, ...)
-- "Reduces the mana cost of your Smite, Holy Fire, and instant cast spells by 9%" (Mental Agility, Improved Healing, Moonglow, ...)
-- "Increases the critical effect chance of your Holy spells by 5%" (Holy Specialization, Improved Regrowth, ...)
-
-"Instant cast spells" means heals with no cast time (Renew, Holy Nova, ...). "Holy spells" / "Nature spells" means every heal of your class's school. Effects that depend on a condition (Renewed Hope's Weakened Soul bonus, Inner Focus, Illumination's mana refund) are not counted.
-
-Each effect is only applied if the game hasn't already applied it, so nothing is counted twice:
-
-- **Healing %** is already in WoW Forever's tooltips (verified for Improved Renew). Once a spell's coefficient has been measured, the addon checks the tooltip actually contains the talent multiplier and applies it itself if it doesn't.
-- **Mana cost.** The game's spell cost already includes cost talents (verified in game: Lesser Heal rank 3 costs 64 mana with Improved Healing 3/3, which is 75 minus 15%). The addon uses the game's cost as-is and lists which talents lowered it when you hover a row.
-- **Crit.** The character sheet shows only your base spell crit. Talents are never included (verified in game: 6.9% with 0 and with 5 points in Holy Specialization). The addon adds every crit talent that applies to a spell on top. The **Crit** column shows each heal's crit chance, HoTs included (yellow = includes talents, "-" for shields and totems), and the header shows your crit with talents.
-
-`/hra talents` lists every talent effect found and whether mana cost talents are in the game's costs. Hover a row to see which talents affect that spell.
-
-## Where the numbers come from
-
-- Heal amounts and durations: parsed from each rank's live spell tooltip, so WoW Forever's changed base values are used.
-- Mana cost and cast time: read from the game client.
-- Spell ranks: `Data.lua` lists vanilla spell IDs (to find untrained ranks), and the spellbook is scanned as well. Any healing spell not in the list, such as WoW Forever additions like Wild Growth, Prayer of Mending, or Binding Heal, is auto-detected from its tooltip and marked "(auto)". Those use generic coefficient and target-count guesses.
-
-## Known limitations
-
-- Estimated +healing shares use vanilla coefficients until the addon has measured a rank. This only affects the Bonus column and the +Healing-off view, not Avg Heal/HPS/HPM.
-- Conditional talent effects (Renewed Hope, Illumination, Litany of Light, Inner Focus) aren't modelled.
-- Tooltip parsing assumes an English client.
-
-## Version
-
-1.3.0
-
-## Author
-
-MendeleevForever
-
-## CurseForge
-
-Project ID 1762670
-
-## Libraries
-
-Embedded in `Libs/`: LibStub, CallbackHandler-1.0, LibDataBroker-1.1 and LibDBIcon-1.0 (v12.1.1), which provide the minimap button. If another addon loads a newer copy of any of these, LibStub uses the newest one automatically.
+Uses LibStub, CallbackHandler-1.0, LibDataBroker-1.1 and LibDBIcon-1.0 for the minimap button.

@@ -1,28 +1,49 @@
+local addonName, ns = ...
+
 -- HealRankAdvisor.lua
 -- Table of every healing spell rank for your class/level with average
--- Healing per Second (HPS) and Healing per Mana (HPM).
+-- Healing per Second (HPS) and Healing per Mana (HPM), healing power
+-- coefficients and base heals.
 
-local ADDON_NAME, ns = ...
 local HRA = {}
 _G.HealRankAdvisor = HRA
 ns.HRA = HRA
 
-local VERSION = "1.3.0"
+local VERSION = "1.4.0"
 local GCD     = 1.5
-local DB
+local DB        -- account-wide settings  (HealRankAdvisorDB)
+local CDB       -- per-character data     (HealRankAdvisorCharDB)
 
+-- Account-wide settings
 local DEFAULTS = {
-    bonus         = true,   -- include +healing (tooltips already do; off = show base heal)
-    crit          = true,   -- include average crit contribution on direct heals
+    crit          = true,   -- include average crit (direct heals and HoT ticks)
     group         = true,   -- multiply group heals by number of targets
     untrained     = true,   -- show ranks available at your level but not trained
     hotByDuration = false,  -- HoT HPS = total / HoT duration instead of / cast time
-    samples       = {},     -- [spellID] = tooltip values at low/high +healing, to measure coefficients
-    healMode      = {},     -- [spell name] = whether talent healing % is in the tooltip
     sort          = "spell",
-    observed      = {},     -- [spellID] = { dur = seconds, sig = talentSignature }
     minimap       = { hide = false },   -- LibDBIcon button settings (position, hidden)
 }
+
+-- Per-character data (depends on the character's level, talents and gear)
+local CHAR_DEFAULTS = {
+    observed      = {},     -- [spellID] = { dur = seconds, sig = talentSignature }
+    samples       = {},     -- [spellID] = tooltip values at low/high healing power
+    healMode      = {},     -- [spell name] = whether talent healing % is in the tooltip
+    dataVersion   = 0,
+}
+
+-- Copies every missing default into `dst` (recursively for tables).
+local function MergeDefaults(dst, defaults)
+    for k, v in pairs(defaults) do
+        if type(v) == "table" then
+            if type(dst[k]) ~= "table" then dst[k] = {} end
+            MergeDefaults(dst[k], v)
+        elseif dst[k] == nil then
+            dst[k] = v
+        end
+    end
+    return dst
+end
 
 -- ============================================================
 -- SMALL HELPERS
@@ -48,11 +69,27 @@ local function Clean(s)
 end
 
 -- WoW Forever (like Midnight) can hand addons "secret" values, e.g. a unit's health
--- or power in combat. They can't be compared or used in math, so check first.
+-- or power in combat. They can't be compared, printed or used in math, so every
+-- piece of unit data goes through these checks before the addon branches on it.
 local function Secret(v)
     return issecretvalue ~= nil and issecretvalue(v) or false
 end
 ns.Secret = Secret
+
+-- Returns v if it is usable (not secret, right type), else the fallback.
+local function Usable(v, kind, fallback)
+    if v == nil or Secret(v) or type(v) ~= kind then return fallback end
+    return v
+end
+
+local function PlayerLevel()
+    return Usable(UnitLevel("player"), "number", 1)
+end
+
+local function PlayerClass()
+    local _, class = UnitClass("player")
+    return Usable(class, "string", "UNKNOWN")
+end
 
 -- ============================================================
 -- ERROR CAPTURE
@@ -148,7 +185,7 @@ local function ManaCost(id)
             if c.type == 0 or c.name == "MANA" then
                 local v = c.cost or 0
                 if v == 0 and (c.costPercent or 0) > 0 then
-                    v = UnitPowerMax("player", 0) * c.costPercent / 100
+                    v = Usable(UnitPowerMax("player", 0), "number", 0) * c.costPercent / 100
                 end
                 return v
             end
@@ -184,11 +221,24 @@ local function SpellDesc(id)
     return Clean(d)
 end
 
+-- True while the game hides combat information (auras etc.) from addons.
+local function AurasRestricted()
+    if InCombatLockdown and InCombatLockdown() then return true end
+    if C_Secrets and C_Secrets.ShouldAurasBeSecret then
+        local ok, secret = pcall(C_Secrets.ShouldAurasBeSecret)
+        if ok and secret == true then return true end
+    end
+    return false
+end
+
 local function ForEachAura(unit, filter, cb)
+    if AurasRestricted() then return end
     if C_UnitAuras and C_UnitAuras.GetAuraDataByIndex then
         for i = 1, 40 do
-            local a = C_UnitAuras.GetAuraDataByIndex(unit, i, filter)
-            if type(a) ~= "table" then break end
+            -- pcall: in WoW Forever reading an aura while auras are secret raises an
+            -- error instead of returning nothing, so stop quietly if that happens.
+            local ok, a = pcall(C_UnitAuras.GetAuraDataByIndex, unit, i, filter)
+            if not ok or type(a) ~= "table" then break end
             local sid, dur, exp, src = a.spellId, a.duration, a.expirationTime, a.sourceUnit
             if not (Secret(sid) or Secret(dur) or Secret(exp) or Secret(src)) then
                 if cb(sid, dur, exp, src) then return end
@@ -196,8 +246,8 @@ local function ForEachAura(unit, filter, cb)
         end
     elseif UnitAura then
         for i = 1, 40 do
-            local name, _, _, _, dur, exp, src, _, _, sid = UnitAura(unit, i, filter)
-            if not name then break end
+            local ok, name, _, _, _, dur, exp, src, _, _, sid = pcall(UnitAura, unit, i, filter)
+            if not ok or not name then break end
             if not (Secret(sid) or Secret(dur) or Secret(exp) or Secret(src)) then
                 if cb(sid, dur, exp, src) then return end
             end
@@ -714,7 +764,7 @@ end
 local autoDefs = {}
 
 function HRA:BuildEntries()
-    local class = select(2, UnitClass("player"))
+    local class = PlayerClass()
     local defs = ns.SPELLS[class] or {}
     local byName = {}
     for _, def in ipairs(defs) do byName[def.lname] = def end
@@ -792,7 +842,7 @@ end
 -- is learned at, it loses 5% of its +healing coefficient per level.
 --   share = 1 - (L - 17 - T) * 0.05, clamped to 0..1
 --   L = your level, T = level the rank is learned at
--- Measured in the beta (levels 18-30); Blizzard confirmed the mechanic without numbers.
+-- Community measurements (levels 18-30); Blizzard confirmed the mechanic without numbers.
 -- Confirmed against in-game tooltips for Lesser Heal 2-3, Renew 1-4 and Heal 1-3 at
 -- level 30. Lesser Heal rank 1 kept less than predicted (~24% vs 40%), so the addon
 -- prefers coefficients it measures from your own tooltips (see HRA:LearnSlope).
@@ -803,10 +853,10 @@ function ns.DownrankShare(playerLevel, learnLevel)
     if not playerLevel or not learnLevel or learnLevel <= 0 then return 1 end
     return Clamp(1 - (playerLevel - ns.DOWNRANK_GRACE - learnLevel) * ns.DOWNRANK_PER_LVL, 0, 1)
 end
--- Remembers each rank's tooltip value at the lowest and highest +healing seen
+-- Remembers each rank's tooltip value at the lowest and highest healing power seen
 -- (same level and talents). Once they are 20+ apart, the slope is the rank's
--- true +healing coefficient including talents and the downranking penalty.
--- `expected` = the estimated +healing per point in the tooltip. It is only used to
+-- true healing power coefficient including talents and the downranking penalty.
+-- `expected` = the estimated healing per point of healing power. It is only used to
 -- throw away readings that can't be right:
 --   * the spell-healing number changed but the tooltip didn't (the game hadn't
 --     updated the tooltip yet, e.g. right after swapping gear), or
@@ -821,11 +871,11 @@ local function PlausibleSlope(slope, dsp, expected)
 end
 
 function HRA:LearnSlope(id, level, sig, sp, value, expected)
-    DB.samples = DB.samples or {}
+    CDB.samples = CDB.samples or {}
     expected = expected or 0
-    local s = DB.samples[id]
+    local s = CDB.samples[id]
     if not s or s.lvl ~= level or s.sig ~= sig then
-        DB.samples[id] = { lvl = level, sig = sig, lo = { sp, value }, hi = { sp, value } }
+        CDB.samples[id] = { lvl = level, sig = sig, lo = { sp, value }, hi = { sp, value } }
         return nil
     end
     -- Only accept a new low/high reading if it agrees with the reading at the other end
@@ -849,7 +899,7 @@ function HRA:LearnSlope(id, level, sig, sp, value, expected)
     local slope = (s.hi[2] - s.lo[2]) / dsp
     if not PlausibleSlope(slope, dsp, expected) then
         -- The stored readings disagree with each other: start over from this one
-        DB.samples[id] = { lvl = level, sig = sig, lo = { sp, value }, hi = { sp, value } }
+        CDB.samples[id] = { lvl = level, sig = sig, lo = { sp, value }, hi = { sp, value } }
         return nil
     end
     return math.max(slope, 0), s.lo[1], s.hi[1]
@@ -899,7 +949,7 @@ function HRA:ComputeEntry(e, mods, sig, bonus, critPct, playerLevel)
                 row.durNote = ("%s detected; cast once to verify"):format(srcs)
             end
         end
-        local ob = DB.observed[e.id]
+        local ob = CDB.observed[e.id]
         if ob and ob.dur and ob.sig == sig then
             effDur, durSrc = ob.dur, "observed"
         end
@@ -958,10 +1008,11 @@ function HRA:ComputeEntry(e, mods, sig, bonus, critPct, playerLevel)
     local critTal, critSrc, critSchoolWide = Applicable(mods.crit, def, isInstant, school)
     local M = 1 + healPct / 100
 
-    -- ---- +Healing ----
-    -- WoW Forever's tooltips already include your +healing, the downranking penalty
-    -- and healing talents (verified in game), so the tooltip value is used as-is.
-    -- The addon only works out the +healing portion, to show it or remove it.
+    -- ---- Healing power ----
+    -- WoW Forever's tooltips already include your healing power, the downranking
+    -- penalty and healing talents (verified in game), so the tooltip value is used
+    -- as-is. The addon works out the healing power portion to show the coefficient
+    -- and the base heal (what the spell heals with 0 healing power).
     local formulaShare = ns.DownrankShare(playerLevel, e.level)
     local share = formulaShare
     local expectedPerSP = (cd + ch) * formulaShare * M
@@ -970,16 +1021,16 @@ function HRA:ComputeEntry(e, mods, sig, bonus, critPct, playerLevel)
     -- Is the talent healing % already in the tooltip? Assumed yes (verified in game for
     -- Improved Renew). Confirmed per spell once a rank that keeps its full +healing has
     -- a measured coefficient: slope / base coefficient equals the multiplier in the tooltip.
-    DB.healMode = DB.healMode or {}
+    CDB.healMode = CDB.healMode or {}
     local healIncluded, healVerified = true, false
-    local hm = DB.healMode[def.lname]
+    local hm = CDB.healMode[def.lname]
     if hm and hm.sig == sig then healIncluded, healVerified = (hm.mode == "included"), true end
     if slope and M > 1.005 and formulaShare >= 0.999 and (cd + ch) > 0 and slope >= 0.02 then
         local ratio = slope / (cd + ch)
         -- "missing" only when the measurement clearly sits at the untalented value
         healIncluded = not (math.abs(ratio - 1) < math.abs(ratio - M) and ratio > 0.8 and ratio < 1.2)
         healVerified = true
-        DB.healMode[def.lname] = { mode = healIncluded and "included" or "missing", sig = sig }
+        CDB.healMode[def.lname] = { mode = healIncluded and "included" or "missing", sig = sig }
     end
     if M <= 1.005 then healIncluded, healVerified = true, false end
     local mult      = healIncluded and M or 1     -- healing % already inside the tooltip
@@ -1021,7 +1072,7 @@ function HRA:ComputeEntry(e, mods, sig, bonus, critPct, playerLevel)
     local critMult = 1
     if DB.crit and canCrit then critMult = 1 + (critTotal / 100) * 0.5 end
 
-    local directNoCrit = (directBase + (DB.bonus and bD or 0)) * extraMult
+    local directNoCrit = (directBase + bD) * extraMult
     local directAvg = directNoCrit * critMult
 
     -- Divine Aegis: non-periodic crits also leave a shield worth X% of the crit heal.
@@ -1033,7 +1084,14 @@ function HRA:ComputeEntry(e, mods, sig, bonus, critPct, playerLevel)
         aegis = directNoCrit * (critTotal / 100) * 1.5 * (aegisPct / 100)
         directAvg = directAvg + aegis
     end
-    local hotAvg    = (hotBase + (DB.bonus and bH or 0)) * durScale * extraMult * critMult
+    local hotAvg    = (hotBase + bH) * durScale * extraMult * critMult
+
+    -- Healing power coefficient and base heal of one cast on one target (no crit):
+    --   coefficient = extra healing per point of healing power (measured from your
+    --                 tooltips at two healing power values, else estimated)
+    --   base heal   = what the cast heals with 0 healing power
+    local coefShown = (perD + perH * durScale) * extraMult
+    local baseHeal  = (directBase + hotBase * durScale) * extraMult
     hot = hot * durScale
     local perTarget = directAvg + hotAvg
     local total     = perTarget * factor
@@ -1066,6 +1124,7 @@ function HRA:ComputeEntry(e, mods, sig, bonus, critPct, playerLevel)
     row.critTal, row.critSrc = critTal, critSrc
     row.critAdd, row.critClient, row.critTotal = critAdd, critPct, critTotal
     row.bonusShare, row.shareMeasured = share, measured
+    row.coef, row.baseHeal = coefShown, baseHeal
     row.slope, row.slopeLo, row.slopeHi = slope, sLo, sHi
     row.tooltipHasBonus = includes
     row.bonusAmt = (bD + bH * durScale) * extraMult
@@ -1083,8 +1142,8 @@ function HRA:ComputeEntry(e, mods, sig, bonus, critPct, playerLevel)
 end
 
 function HRA:ComputeRows()
-    local _, class = UnitClass("player")
-    local level = UnitLevel("player")
+    local class = PlayerClass()
+    local level = PlayerLevel()
     local entries = self:BuildEntries()
     local talents = self:ReadTalents()
     local mods = self:GetTalentMods(talents)
@@ -1115,7 +1174,7 @@ end
 local MainFrame
 local ROWS = {}
 local LH = 18
-local FRAME_W, FRAME_H = 770, 540
+local FRAME_W, FRAME_H = 810, 540
 local SCROLL_LEFT = 20          -- scroll area inset from the window's left edge
 local CHILD_W = FRAME_W - SCROLL_LEFT - 40
 
@@ -1136,15 +1195,22 @@ local C = {
 local COLS = {
     { key = "name",  label = "Spell",    w = 150, justify = "LEFT",   sort = "spell" },
     { key = "rank",  label = "Rank",     w = 36,  justify = "CENTER" },
-    { key = "level", label = "Lvl",      w = 30,  justify = "CENTER" },
-    { key = "bonus", label = "Bonus",    w = 46,  justify = "RIGHT" },
-    { key = "cast",  label = "Cast",     w = 54,  justify = "RIGHT" },
+    { key = "level", label = "Lvl",      w = 30,  justify = "CENTER",
+      tip = "Level the rank is learned at." },
+    { key = "coef",  label = "Coef",     w = 50,  justify = "RIGHT",  sort = "coef",
+      tip = "Healing power coefficient: extra healing per point of healing power, for one cast on one target. Measured from your tooltips; ~ = estimate until measured." },
+    { key = "base",  label = "Base",     w = 50,  justify = "RIGHT",  sort = "baseHeal",
+      tip = "Base heal: what one cast heals on one target with 0 healing power (no crit). ~ = estimate until measured." },
+    { key = "cast",  label = "Cast",     w = 50,  justify = "RIGHT" },
     { key = "dur",   label = "HoT",      w = 40,  justify = "RIGHT" },
     { key = "mana",  label = "Mana",     w = 48,  justify = "RIGHT",  sort = "mana" },
     { key = "crit",  label = "Crit",     w = 46,  justify = "RIGHT" },
-    { key = "heal",  label = "Avg Heal", w = 70,  justify = "RIGHT",  sort = "total" },
-    { key = "hps",   label = "HPS",      w = 60,  justify = "RIGHT",  sort = "hps" },
-    { key = "hpm",   label = "HPM",      w = 56,  justify = "RIGHT",  sort = "hpm" },
+    { key = "heal",  label = "Avg Heal", w = 66,  justify = "RIGHT",  sort = "total",
+      tip = "Average heal of one cast with your healing power and crit (group heals: all targets)." },
+    { key = "hps",   label = "HPS",      w = 56,  justify = "RIGHT",  sort = "hps",
+      tip = "Healing per second. Coloured red (lowest) to green (highest) within each spell." },
+    { key = "hpm",   label = "HPM",      w = 52,  justify = "RIGHT",  sort = "hpm",
+      tip = "Healing per mana. Coloured red (lowest) to green (highest) within each spell." },
 }
 do
     local x = 6
@@ -1222,17 +1288,20 @@ local function RowOnEnter(self)
         end
     end
     do
-        local share = math.floor((r.bonusShare or 0) * 100 + 0.5)
-        GT:AddDoubleLine("+Healing share:", ("%d%%  (%s)"):format(share, r.shareMeasured and "measured" or "estimated"),
-            0.8, 0.8, 0.8, r.shareMeasured and 0.4 or 1, 1, r.shareMeasured and 0.4 or 1)
-        local verb = r.tooltipHasBonus and "in tooltip" or "added by addon"
-        if not DB.bonus then verb = "removed (+Healing off)" end
-        GT:AddDoubleLine("+Healing " .. verb .. ":", ("%s  (of %d)"):format(FmtInt(r.bonusAmt), r.spellHealing),
-            0.8, 0.8, 0.8, 0.6, 1, 0.6)
-        if r.shareMeasured then
-            GT:AddLine(("  measured from your tooltips at %d and %d spell healing"):format(r.slopeLo, r.slopeHi), 0.6, 0.6, 0.6)
+        local measured = r.shareMeasured
+        GT:AddDoubleLine("Coefficient:", ("%s%.3f  (%s)"):format(measured and "" or "~", r.coef or 0,
+            measured and "measured" or "estimate"), 0.8, 0.8, 0.8, measured and 0.4 or 1, 1, measured and 0.4 or 1)
+        GT:AddDoubleLine("Base heal:", ("%s%s  at 0 healing power"):format(measured and "" or "~", FmtInt(r.baseHeal or 0)),
+            0.8, 0.8, 0.8, 1, 1, 1)
+        GT:AddDoubleLine("From healing power:", ("+%s  (%d x %.3f)"):format(FmtInt((r.coef or 0) * (r.spellHealing or 0)),
+            r.spellHealing or 0, r.coef or 0), 0.8, 0.8, 0.8, 0.6, 1, 0.6)
+        if measured then
+            GT:AddLine(("  measured from your tooltips at %d and %d healing power"):format(r.slopeLo, r.slopeHi), 0.6, 0.6, 0.6)
         else
-            GT:AddLine("  change your +healing by 20+ (swap gear) to measure it", 0.6, 0.6, 0.6)
+            GT:AddLine("  change your healing power by 20+ (swap gear, Refresh) to measure it", 0.6, 0.6, 0.6, true)
+        end
+        if r.tf and r.tf > 1 then
+            GT:AddLine("  coefficient and base heal are per target", 0.6, 0.6, 0.6)
         end
         if r.mult and r.mult > 1.0001 then
             GT:AddLine(("  includes +%s%% healing from talents"):format(FmtSec((r.mult - 1) * 100)), 0.6, 0.6, 0.6)
@@ -1240,12 +1309,14 @@ local function RowOnEnter(self)
         if r.level and r.level > 0 then
             local fadeStart = r.level + ns.DOWNRANK_GRACE + 1
             local gone = r.level + ns.DOWNRANK_GRACE + math.ceil(1 / ns.DOWNRANK_PER_LVL)
+            local keeps = math.floor((r.bonusShare or 1) * 100 + 0.5)
             if r.playerLevel >= gone then
-                GT:AddLine(("  downranking: no +healing left since level %d"):format(gone), 1, 0.4, 0.3)
+                GT:AddLine(("  downranking: gets no healing power since level %d"):format(gone), 1, 0.4, 0.3)
             elseif r.playerLevel >= fadeStart then
-                GT:AddLine(("  downranking: -5%% per level since %d, none left at %d"):format(fadeStart, gone), 1, 0.6, 0.3)
+                GT:AddLine(("  downranking: keeps %d%% of its full coefficient (-5%% per level since %d, none at %d)"):format(
+                    keeps, fadeStart, gone), 1, 0.6, 0.3, true)
             else
-                GT:AddLine(("  full +healing until level %d, then -5%% per level"):format(fadeStart - 1), 0.6, 0.6, 0.6)
+                GT:AddLine(("  full coefficient until level %d, then -5%% per level"):format(fadeStart - 1), 0.6, 0.6, 0.6)
             end
         end
     end
@@ -1327,7 +1398,6 @@ local function GetRow(i)
 end
 
 local OPTION_TIPS = {
-    bonus = "Include your +healing. WoW Forever tooltips already include it (with the downranking penalty), so this is on by default. Turn off to see each rank's base heal.",
     crit = "Include the average value of critical heals. In WoW Forever heals over time can crit too (every tick). Shields don't crit.",
     group = "Multiply group heals (Prayer of Healing, Chain Heal, Tranquility, ...) by the number of targets they hit.",
     untrained = "Also list ranks you could train at your level but haven't yet (shown in grey).",
@@ -1421,9 +1491,16 @@ local function MakeFrame()
         b.col = col
         if col.sort then
             b:SetScript("OnClick", function() DB.sort = col.sort; Safe(HRA.Render, HRA) end)
+        end
+        if col.sort or col.tip then
             b:SetScript("OnEnter", function(self)
                 GameTooltip:SetOwner(self, "ANCHOR_TOP")
-                GameTooltip:AddLine(col.sort == "spell" and "Sort by spell & rank" or ("Sort by " .. col.label))
+                GameTooltip:AddLine(col.label, 1, 0.82, 0)
+                if col.tip then GameTooltip:AddLine(col.tip, 1, 1, 1, true) end
+                if col.sort then
+                    GameTooltip:AddLine(col.sort == "spell" and "Click to sort by spell & rank" or "Click to sort",
+                        0.6, 0.6, 0.6)
+                end
                 GameTooltip:Show()
             end)
             b:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -1464,12 +1541,12 @@ local function MakeFrame()
     f.legend:SetTextColor(C.legend[1], C.legend[2], C.legend[3])
     f.legend:SetText("Cast / HoT / Crit colour:  |cffe6d6aenormal|r = from game client,  "
         .. "|cffffe64dyellow|r = talent applied by addon,  "
-        .. "|cff66ff66green|r = confirmed by your own cast.   Bonus: ~ = estimated.   Hover a row for talent details.")
+        .. "|cff66ff66green|r = confirmed by your own cast.   Coef / Base: ~ = estimate until measured.   Hover a row for details.")
 
     -- Options
     local x = SCROLL_LEFT
     local opts = {
-        { "bonus", "+Healing" }, { "crit", "Crit" }, { "group", "Group heals" },
+        { "crit", "Crit" }, { "group", "Group heals" },
         { "untrained", "Untrained ranks" }, { "hotByDuration", "HoT HPS by duration" },
     }
     f.checks = {}
@@ -1585,7 +1662,7 @@ function HRA:ShowErrors()
     if GetBuildInfo then version, build, _, toc = GetBuildInfo() end
     lines[#lines + 1] = ("HealRankAdvisor %s  |  client %s (%s, toc %s)  |  %s level %d"):format(
         VERSION, tostring(version), tostring(build), tostring(toc),
-        select(2, UnitClass("player")) or "?", UnitLevel("player") or 0)
+        PlayerClass(), PlayerLevel())
     for i, e in ipairs(ERRORS) do
         lines[#lines + 1] = ""
         lines[#lines + 1] = ("#%d  [%s]  x%d  %s"):format(i, e.time, e.count, e.msg)
@@ -1643,13 +1720,17 @@ function HRA:Render()
         else b.fs:SetTextColor(C.header[1], C.header[2], C.header[3]) end
     end
 
-    local hpsLo, hpsHi, hpmLo, hpmHi
+    -- HPS / HPM colours: each spell gets its own red (lowest) -> green (highest)
+    -- range, built from the ranks you know.
+    local ranges = {}
     local pending = false
     for _, r in ipairs(rows) do
         if r.pending then pending = true end
         if r.known and not r.pending then
-            if r.hps then hpsLo = math.min(hpsLo or r.hps, r.hps); hpsHi = math.max(hpsHi or r.hps, r.hps) end
-            if r.hpm then hpmLo = math.min(hpmLo or r.hpm, r.hpm); hpmHi = math.max(hpmHi or r.hpm, r.hpm) end
+            local g = ranges[r.e.def]
+            if not g then g = {}; ranges[r.e.def] = g end
+            if r.hps then g.hpsLo = math.min(g.hpsLo or r.hps, r.hps); g.hpsHi = math.max(g.hpsHi or r.hps, r.hps) end
+            if r.hpm then g.hpmLo = math.min(g.hpmLo or r.hpm, r.hpm); g.hpmHi = math.max(g.hpmHi or r.hpm, r.hpm) end
         end
     end
 
@@ -1686,7 +1767,7 @@ function HRA:Render()
         set("level", (r.level and r.level > 0) and tostring(r.level) or "-")
 
         if r.pending then
-            set("bonus", ""); set("cast", ""); set("dur", ""); set("mana", ""); set("crit", ""); set("hps", ""); set("hpm", "")
+            set("coef", ""); set("base", ""); set("cast", ""); set("dur", ""); set("mana", ""); set("crit", ""); set("hps", ""); set("hpm", "")
             set("heal", "loading...", COLOR.grey)
         else
             local castText
@@ -1695,12 +1776,10 @@ function HRA:Render()
             else castText = FmtSec(r.cast) .. "s" end
             set("cast", castText, r.castAdjusted and COLOR.yellow or nil)
 
-            -- Share of +healing this rank keeps (WoW Forever downranking).
-            -- "~" = estimated from the formula, no "~" = measured from your tooltips.
-            local share = r.bonusShare or 1
-            local shareCol = share >= 0.995 and nil or { Grad(share, 0, 1) }
-            if not DB.bonus then shareCol = COLOR.grey end
-            set("bonus", ("%s%d%%"):format(r.shareMeasured and "" or "~", math.floor(share * 100 + 0.5)), shareCol)
+            -- Healing power coefficient and base heal. "~" = estimate until measured.
+            local est = r.shareMeasured and "" or "~"
+            set("coef", ("%s%.3f"):format(est, r.coef or 0))
+            set("base", est .. FmtInt(r.baseHeal or 0))
 
             local durCol = (r.durSrc == "observed" and COLOR.green) or (r.durSrc == "talent" and COLOR.yellow) or nil
             set("dur", (r.effDur and not r.channel) and (FmtSec(r.effDur) .. "s") or "-", durCol)
@@ -1713,8 +1792,9 @@ function HRA:Render()
                 set("crit", "-")
             end
             set("heal", FmtInt(r.total))
-            set("hps", r.hps and ("%.1f"):format(r.hps) or "-", { Grad(r.hps, hpsLo, hpsHi) })
-            set("hpm", r.hpm and ("%.2f"):format(r.hpm) or "-", { Grad(r.hpm, hpmLo, hpmHi) })
+            local g = ranges[r.e.def] or {}
+            set("hps", r.hps and ("%.1f"):format(r.hps) or "-", { Grad(r.hps, g.hpsLo, g.hpsHi) })
+            set("hpm", r.hpm and ("%.2f"):format(r.hpm) or "-", { Grad(r.hpm, g.hpmLo, g.hpmHi) })
         end
         row:Show()
         y = y - LH
@@ -1736,9 +1816,9 @@ function HRA:Render()
             info.crit or 0, FmtSec(info.critTalent))
     end
     if not DB.crit then critText = critText .. " |cff7d705a(off)|r" end
-    f.info:SetText(("Level %d %s   |cff7d705a•|r   +Healing %s%s   |cff7d705a•|r   %s crit %s   |cff7d705a•|r   Updated %s"):format(
+    f.info:SetText(("Level %d %s   |cff7d705a•|r   Healing power %s   |cff7d705a•|r   %s crit %s   |cff7d705a•|r   Updated %s"):format(
         info.level or 0, CLASS_DISPLAY[info.class] or (info.class or "?"):lower(),
-        FmtInt(info.bonus), DB.bonus and "" or " |cff7d705a(off)|r",
+        FmtInt(info.bonus),
         ns.SCHOOL_NAME[info.school] or "Spell", critText, self.updatedAt or "-"))
 
     f:Show()
@@ -1776,6 +1856,7 @@ end
 -- After you cast a HoT, read the real duration off the aura you applied.
 -- ============================================================
 local function ObserveHot(spellID, castAt)
+    if AurasRestricted() then return end   -- in combat: auras are hidden, try next cast
     local units = { "target", "player", "focus", "mouseover", "party1", "party2", "party3", "party4" }
     local inRaid = IsInRaid and IsInRaid()
     if inRaid and not Secret(inRaid) then for i = 1, 40 do units[#units + 1] = "raid" .. i end end
@@ -1792,8 +1873,8 @@ local function ObserveHot(spellID, castAt)
             end)
             if found then
                 local rounded = math.floor(found * 10 + 0.5) / 10
-                local prev = DB.observed[spellID]
-                DB.observed[spellID] = { dur = rounded, sig = TalentSig() }
+                local prev = CDB.observed[spellID]
+                CDB.observed[spellID] = { dur = rounded, sig = TalentSig() }
                 if not prev or prev.dur ~= rounded then
                     local sub = SpellSubtext(spellID)
                     print(("|cff00ff96HealRankAdvisor:|r %s%s lasts |cffffff00%ss|r (click Refresh to update the table)"):format(
@@ -1819,7 +1900,7 @@ function HRA:SetupMinimapButton()
     if not ldb or not icon then return end
     DB.minimap = DB.minimap or { hide = false }
 
-    local launcher = ldb:NewDataObject(ADDON_NAME, {
+    local launcher = ldb:NewDataObject(addonName, {
         type  = "launcher",
         label = "Heal Rank Advisor",
         text  = "Heal Rank Advisor",
@@ -1843,9 +1924,31 @@ function HRA:SetupMinimapButton()
         end,
     })
     if not launcher then return end
-    icon:Register(ADDON_NAME, launcher, DB.minimap)
+    icon:Register(addonName, launcher, DB.minimap)
     self.ldbIcon = icon
     self.minimapReady = true
+end
+
+-- Addon compartment (the addon list button by the minimap). Wired up in the .toc.
+function HealRankAdvisor_OnAddonCompartmentClick(_, mouseButton)
+    if mouseButton == "RightButton" then
+        Safe(HRA.Refresh, HRA)
+    else
+        Safe(HRA.Toggle, HRA)
+    end
+end
+
+function HealRankAdvisor_OnAddonCompartmentEnter(_, menuButton)
+    if not menuButton then return end
+    GameTooltip:SetOwner(menuButton, "ANCHOR_LEFT")
+    GameTooltip:AddLine("Heal Rank Advisor", 1, 0.82, 0)
+    GameTooltip:AddLine("|cffe6d6aeLeft-click|r  open / close the table", 1, 1, 1)
+    GameTooltip:AddLine("|cffe6d6aeRight-click|r  open and refresh", 1, 1, 1)
+    GameTooltip:Show()
+end
+
+function HealRankAdvisor_OnAddonCompartmentLeave()
+    GameTooltip:Hide()
 end
 
 function HRA:ToggleMinimapButton()
@@ -1855,10 +1958,10 @@ function HRA:ToggleMinimapButton()
     end
     DB.minimap.hide = not DB.minimap.hide
     if DB.minimap.hide then
-        self.ldbIcon:Hide(ADDON_NAME)
+        self.ldbIcon:Hide(addonName)
         print("|cff00ff96HealRankAdvisor:|r minimap button hidden. Type /hra minimap to show it again.")
     else
-        self.ldbIcon:Show(ADDON_NAME)
+        self.ldbIcon:Show(addonName)
         print("|cff00ff96HealRankAdvisor:|r minimap button shown.")
     end
 end
@@ -1868,19 +1971,25 @@ end
 -- ============================================================
 SLASH_HEALRANKADVISOR1 = "/hra"
 SLASH_HEALRANKADVISOR2 = "/healranks"
+local function PrintHelp()
+    print(("|cff00ff96HealRankAdvisor %s|r commands:"):format(VERSION))
+    print("  /hra            Open or close the table")
+    print("  /hra refresh    Recalculate the table")
+    print("  /hra talents    List your talents and the effects found on your heals")
+    print("  /hra minimap    Show or hide the minimap button")
+    print("  /hra resetobs   Forget learned HoT durations and coefficient measurements")
+    print("  /hra errors     Show caught errors in a window you can copy from")
+    print("  /hra debug      Print the parsed values for every row")
+    print("  /hra help       Show this list")
+end
+
 local function SlashHandler(msg)
-    msg = strtrim and strtrim((msg or ""):lower()) or (msg or ""):lower()
+    msg = (type(msg) == "string") and msg:lower():gsub("^%s+", ""):gsub("%s+$", "") or ""
     if msg == "errors" then
         HRA:ShowErrors()
         return
-    elseif msg == "help" then
-        print("|cff00ff96HealRankAdvisor|r commands:")
-        print("  /hra            Toggle the table")
-        print("  /hra talents    List your talents and the effects found on your heals")
-        print("  /hra debug      Print the parsed values for every row")
-        print("  /hra resetobs   Forget learned HoT durations, mana costs and measurements")
-        print("  /hra errors     Show caught errors in a window you can copy from")
-        print("  /hra minimap    Show or hide the minimap button")
+    elseif msg == "help" or msg == "?" then
+        PrintHelp()
         return
     elseif msg == "talents" then
         local talents = HRA:ReadTalents()
@@ -1907,18 +2016,18 @@ local function SlashHandler(msg)
         if not ok then print("error: " .. tostring(rows)) return end
         for _, r in ipairs(rows) do
             local p = r.parsed or {}
-            print(("[%d] %s r%s lvl%s | castNow=%s ttDur=%s effDur=%s(%s) | min=%s max=%s hot=%s tick=%s/%s | tf=%s mana=%s bonus%%=%s | HPS=%s HPM=%s"):format(
+            print(("[%d] %s r%s lvl%s | castNow=%s ttDur=%s effDur=%s(%s) | min=%s max=%s hot=%s tick=%s/%s | tf=%s mana=%s coef=%s base=%s | HPS=%s HPM=%s"):format(
                 r.id, r.name, tostring(r.rank), tostring(r.level), tostring(r.castNow), tostring(r.ttDur),
                 tostring(r.effDur), tostring(r.durSrc), tostring(p.min), tostring(p.max), tostring(p.hotTotal),
                 tostring(p.tick), tostring(p.interval), tostring(r.tf), tostring(r.mana),
-                r.bonusShare and tostring(math.floor(r.bonusShare * 100 + 0.5)) or "-",
+                r.coef and ("%.3f"):format(r.coef) or "-", r.baseHeal and tostring(math.floor(r.baseHeal + 0.5)) or "-",
                 r.hps and ("%.1f"):format(r.hps) or "-", r.hpm and ("%.2f"):format(r.hpm) or "-"))
         end
         return
     elseif msg == "resetobs" then
-        wipe(DB.observed)
-        DB.healMode, DB.samples = {}, {}
-        DB.costObs, DB.costMode = nil, nil   -- leftovers from older versions
+        wipe(CDB.observed)
+        CDB.healMode, CDB.samples = {}, {}
+        CDB.costObs, CDB.costMode = nil, nil   -- leftovers from older versions
         print("|cff00ff96HealRankAdvisor:|r learned durations, mana costs and measurements cleared.")
         if MainFrame and MainFrame:IsShown() then HRA:Refresh() end
         return
@@ -1928,23 +2037,26 @@ local function SlashHandler(msg)
     elseif msg == "refresh" then
         HRA:Refresh()
         return
+    elseif msg ~= "" then
+        print(("|cff00ff96HealRankAdvisor:|r unknown command \"%s\"."):format(msg))
+        PrintHelp()
+        return
     end
     HRA:Toggle()
 end
 SlashCmdList["HEALRANKADVISOR"] = function(msg) Safe(SlashHandler, msg) end
 
 -- ============================================================
--- EVENTS
+-- EVENTS — one frame, one handler table
 -- ============================================================
 local ev = CreateFrame("Frame")
+local handlers = {}
+
 local function Reg(event, unit)
     pcall(function()
         if unit and ev.RegisterUnitEvent then ev:RegisterUnitEvent(event, unit) else ev:RegisterEvent(event) end
     end)
 end
-
-Reg("ADDON_LOADED")
-Reg("PLAYER_LOGIN")
 
 -- The HoT-duration listener is registered only while the table window is open.
 function HRA:SetLearning(on)
@@ -1955,35 +2067,54 @@ function HRA:SetLearning(on)
     end
 end
 
-local function OnEvent(self, event, ...)
-    if event == "ADDON_LOADED" then
-        if ... ~= ADDON_NAME then return end
-        HealRankAdvisorCharDB = HealRankAdvisorCharDB or {}
-        DB = HealRankAdvisorCharDB
-        for k, v in pairs(DEFAULTS) do
-            if DB[k] == nil then DB[k] = (type(v) == "table") and {} or v end
-        end
-        -- Measurements stored by versions before 1.2.4 weren't checked for stale
-        -- tooltips and could be wrong: start them over once.
-        if (DB.dataVersion or 0) < 2 then
-            DB.samples, DB.healMode = {}, {}
-            DB.dataVersion = 2
-        end
-        self:UnregisterEvent("ADDON_LOADED")
-        Safe(HRA.SetupMinimapButton, HRA)
+function handlers.ADDON_LOADED(loadedName)
+    if loadedName ~= addonName then return end
+    ev:UnregisterEvent("ADDON_LOADED")
 
-    elseif event == "PLAYER_LOGIN" then
-        self:UnregisterEvent("PLAYER_LOGIN")
-        print(("|cff00ff96HealRankAdvisor %s|r loaded  —  /hra to open, /hra help for options"):format(VERSION))
+    -- Saved variables are created here and nowhere else, merged onto defaults.
+    local firstAccountLoad = (HealRankAdvisorDB == nil)
+    HealRankAdvisorDB     = MergeDefaults(HealRankAdvisorDB or {}, DEFAULTS)
+    HealRankAdvisorCharDB = MergeDefaults(HealRankAdvisorCharDB or {}, CHAR_DEFAULTS)
+    DB, CDB = HealRankAdvisorDB, HealRankAdvisorCharDB
 
-    elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
-        local unit, _, spellID = ...
-        if unit ~= "player" or not spellID then return end
-        if ns.HOT_IDS[spellID] then
-            local castAt = GetTime()
-            C_Timer.After(0.3, function() Safe(ObserveHot, spellID, castAt) end)
+    -- Before 1.4.0 the options lived in the per-character table: carry them over once.
+    if firstAccountLoad then
+        for _, k in ipairs({ "crit", "group", "untrained", "hotByDuration", "sort" }) do
+            if CDB[k] ~= nil then DB[k] = CDB[k] end
         end
+        if type(CDB.minimap) == "table" then DB.minimap = MergeDefaults(CDB.minimap, DEFAULTS.minimap) end
+    end
+    for _, k in ipairs({ "bonus", "crit", "group", "untrained", "hotByDuration", "sort", "minimap", "costObs", "costMode" }) do
+        CDB[k] = nil
+    end
+    if DB.sort == "bonusShare" then DB.sort = "spell" end
+
+    -- Measurements stored by versions before 1.2.4 weren't checked for stale
+    -- tooltips and could be wrong: start them over once.
+    if (CDB.dataVersion or 0) < 2 then
+        CDB.samples, CDB.healMode = {}, {}
+        CDB.dataVersion = 2
+    end
+    Safe(HRA.SetupMinimapButton, HRA)
+end
+
+function handlers.PLAYER_LOGIN()
+    ev:UnregisterEvent("PLAYER_LOGIN")
+    print(("|cff00ff96HealRankAdvisor %s|r loaded  —  /hra to open, /hra help for commands"):format(VERSION))
+end
+
+function handlers.UNIT_SPELLCAST_SUCCEEDED(unit, _, spellID)
+    if unit ~= "player" or type(spellID) ~= "number" or Secret(spellID) then return end
+    -- HoT durations are only learned out of combat (auras are hidden in combat)
+    if ns.HOT_IDS[spellID] and not AurasRestricted() then
+        local castAt = GetTime()
+        C_Timer.After(0.3, function() Safe(ObserveHot, spellID, castAt) end)
     end
 end
 
-ev:SetScript("OnEvent", function(self, event, ...) Safe(OnEvent, self, event, ...) end)
+ev:SetScript("OnEvent", function(_, event, ...)
+    local handler = handlers[event]
+    if handler then Safe(handler, ...) end
+end)
+Reg("ADDON_LOADED")
+Reg("PLAYER_LOGIN")
