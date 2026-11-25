@@ -8,8 +8,9 @@ Made for **WoW Forever**.
 
 ## Getting started
 
-1. Copy the `HealRankAdvisor` folder into your WoW Forever `Interface/AddOns` folder (the same place as your other addons).
-2. Start the game, or type `/reload` if you're already in.
+1. Unzip the download and copy the `HealRankAdvisor` folder to:
+   `World of Warcraft\_forever_\Interface\AddOns\HealRankAdvisor\`
+2. Start the game. If **Heal Rank Advisor** doesn't appear in the AddOns list, fully restart the game client (a `/reload` isn't enough for a brand-new addon folder).
 3. Click the **Lightwell** icon on your minimap, pick **Heal Rank Advisor** from the addon list button next to the minimap, or type **`/hra`**.
 
 That's it. The table works straight away.
@@ -52,7 +53,7 @@ Each spell gets its own block, with one row per rank.
 
 ## The options
 
-The tick boxes along the bottom change how the numbers are worked out:
+The tick boxes along the bottom of the table change how the numbers are worked out. The same options are in the game's settings under **Esc → Options → AddOns → Heal Rank Advisor** (or type `/hra options`), together with a setting to hide the minimap button.
 
 - **Crit** – counts the average value of critical heals. In WoW Forever heals over time can crit too, so every HoT tick counts.
 - **Group heals** – multiplies heals like Prayer of Healing and Chain Heal by the number of people they hit.
@@ -86,6 +87,11 @@ Avg Heal, HPS and HPM are always exact, because they come straight from the game
 3. Put the item back on and click **Refresh** once more.
 
 Once your healing power has changed by 20 or more, the **~** disappears for every rank. Each character keeps its own measurements. They start over automatically when you level up or change talents, because both change the numbers.
+
+- The game updates spell tooltips a moment after you change gear. If you click Refresh too quickly, the top line says *"Tooltips haven't caught up with your gear yet – click Refresh again"*. Just click Refresh once more.
+- Re-opening the window shows the last results, so always click **Refresh** after changing gear.
+- Hovering a row whose Coef still has a **~** tells you why, for example *"read at 312 healing power so far"*.
+- Very old ranks can measure **0.000**: downranking means they get nothing from your healing power any more, so their heal doesn't change when your gear does.
 
 ### Confirming HoT durations
 
@@ -133,6 +139,7 @@ Type `/hra minimap` to hide or show it. The addon list button next to the minima
 |---|---|
 | `/hra` | Open or close the table |
 | `/hra refresh` | Recalculate the table |
+| `/hra options` | Open the addon's options in the game settings |
 | `/hra talents` | List your talents and what they change |
 | `/hra minimap` | Hide or show the minimap button |
 | `/hra resetobs` | Forget confirmed HoT durations and coefficient measurements |
@@ -147,6 +154,7 @@ Type `/hra minimap` to hide or show it. The addon list button next to the minima
 - **A number looks off?** Click **Refresh** first. If you changed gear or talents since the last update, the table won't know yet.
 - **A message says an error was caught?** Type `/hra errors`, press **Ctrl+A** then **Ctrl+C** to copy everything, and include it in your bug report.
 - **Reporting a wrong value?** Hover the row and take a screenshot, and include the output of `/hra debug` if you can.
+- **Settings or measurements not kept between sessions?** The addon saves everything through the game's normal saved-variables system, so this may be the game client rather than the addon. Make sure you exit the game normally (not by force-closing it), and report it if it keeps happening.
 
 ### Known limitations
 
@@ -156,6 +164,6 @@ Type `/hra minimap` to hide or show it. The addon list button next to the minima
 
 ---
 
-**Version** 1.4.0 · **Author** MendeleevForever · **CurseForge project** 1762670
+**Version** 1.5.1 · **Author** MendeleevForever · **CurseForge project** 1762670
 
 Uses LibStub, CallbackHandler-1.0, LibDataBroker-1.1 and LibDBIcon-1.0 for the minimap button.

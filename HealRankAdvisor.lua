@@ -9,7 +9,7 @@ local HRA = {}
 _G.HealRankAdvisor = HRA
 ns.HRA = HRA
 
-local VERSION = "1.4.0"
+local VERSION = "1.5.1"
 local GCD     = 1.5
 local DB        -- account-wide settings  (HealRankAdvisorDB)
 local CDB       -- per-character data     (HealRankAdvisorCharDB)
@@ -123,69 +123,67 @@ end
 ns.Safe = Safe
 
 -- ============================================================
--- API WRAPPERS (work with both the classic globals and the C_ namespaces)
+-- API WRAPPERS
+-- Forever uses the Mainline API: spell data comes from C_Spell / C_SpellBook /
+-- C_TooltipInfo, never from the old globals (GetSpellInfo etc. don't exist).
+-- Every function is checked before use, and strings are checked for secrets.
 -- ============================================================
+local function Str(v) return (type(v) == "string" and not Secret(v)) and v or nil end
+local function Num(v) return (type(v) == "number" and not Secret(v)) and v or nil end
+
 local function SpellName(id)
-    if C_Spell and C_Spell.GetSpellName then
-        local n = C_Spell.GetSpellName(id)
-        if n then return n end
-    end
-    if GetSpellInfo then return (GetSpellInfo(id)) end
+    if not id or not (C_Spell and C_Spell.GetSpellName) then return nil end
+    return Str(C_Spell.GetSpellName(id))
 end
 
 local function CastMs(id)
     if C_Spell and C_Spell.GetSpellInfo then
-        local i = C_Spell.GetSpellInfo(id)
-        if type(i) == "table" then return i.castTime or 0 end
-    end
-    if GetSpellInfo then
-        local _, _, _, ct = GetSpellInfo(id)
-        return ct or 0
+        local i = C_Spell.GetSpellInfo(id)          -- returns a table (or nil until cached)
+        if type(i) == "table" then return Num(i.castTime) or 0 end
     end
     return 0
 end
 
 local function SpellSubtext(id)
     if C_Spell and C_Spell.GetSpellSubtext then
-        local s = C_Spell.GetSpellSubtext(id)
+        local s = Str(C_Spell.GetSpellSubtext(id))
         if s and s ~= "" then return s end
     end
-    if GetSpellSubtext then return GetSpellSubtext(id) end
 end
 
 local function IsPassive(id)
-    if C_Spell and C_Spell.IsSpellPassive then return C_Spell.IsSpellPassive(id) end
-    if IsPassiveSpell then return IsPassiveSpell(id) end
+    if C_Spell and C_Spell.IsSpellPassive then return C_Spell.IsSpellPassive(id) == true end
     return false
 end
 
 local function Known(id)
-    if IsPlayerSpell and IsPlayerSpell(id) then return true end
-    if IsSpellKnown and IsSpellKnown(id) then return true end
+    if IsPlayerSpell and IsPlayerSpell(id) == true then return true end
+    if C_SpellBook and C_SpellBook.IsSpellKnown then
+        local ok, known = pcall(C_SpellBook.IsSpellKnown, id)
+        if ok and known == true then return true end
+    end
     return false
 end
 
 local function LearnLevel(id, fallback)
-    if GetSpellLevelLearned then
-        local ok, l = pcall(GetSpellLevelLearned, id)
-        if ok and type(l) == "number" and l > 0 then return l end
+    local fn = (C_Spell and C_Spell.GetSpellLevelLearned) or GetSpellLevelLearned
+    if fn then
+        local ok, l = pcall(fn, id)
+        l = ok and Num(l)
+        if l and l > 0 then return l end
     end
     return fallback or 0
 end
 
 local function ManaCost(id)
-    local costs
-    if C_Spell and C_Spell.GetSpellPowerCost then
-        costs = C_Spell.GetSpellPowerCost(id)
-    elseif GetSpellPowerCost then
-        costs = GetSpellPowerCost(id)
-    end
+    local costs = C_Spell and C_Spell.GetSpellPowerCost and C_Spell.GetSpellPowerCost(id)
     if type(costs) == "table" then
         for _, c in ipairs(costs) do
             if c.type == 0 or c.name == "MANA" then
-                local v = c.cost or 0
-                if v == 0 and (c.costPercent or 0) > 0 then
-                    v = Usable(UnitPowerMax("player", 0), "number", 0) * c.costPercent / 100
+                local v = Num(c.cost) or 0
+                local pct = Num(c.costPercent) or 0
+                if v == 0 and pct > 0 then
+                    v = Usable(UnitPowerMax("player", 0), "number", 0) * pct / 100
                 end
                 return v
             end
@@ -194,28 +192,47 @@ local function ManaCost(id)
     return 0
 end
 
+-- Hidden tooltip, only used if C_TooltipInfo can't describe a spell or talent.
 local scanTip = CreateFrame("GameTooltip", "HRAScanTooltip", nil, "GameTooltipTemplate")
 scanTip:SetScript("OnUpdate", nil)   -- a scanning tooltip never needs to refresh itself
 scanTip:Hide()
 
+-- Spell data that hasn't loaded yet: requested here, re-read on SPELL_DATA_LOAD_RESULT.
+HRA.pendingLoads = {}
+
+local function RequestSpellLoad(id)
+    if C_Spell and C_Spell.RequestLoadSpellData and id then
+        HRA.pendingLoads[id] = true
+        C_Spell.RequestLoadSpellData(id)
+    end
+end
+
 local function TooltipDesc(id)
+    if C_TooltipInfo and C_TooltipInfo.GetSpellByID then
+        local ok, data = pcall(C_TooltipInfo.GetSpellByID, id)
+        if ok and type(data) == "table" and type(data.lines) == "table" then
+            for i = #data.lines, 1, -1 do               -- the description is the last line
+                local tx = Str(data.lines[i].leftText)
+                if tx and tx ~= "" then return tx end
+            end
+        end
+    end
     scanTip:SetOwner(WorldFrame, "ANCHOR_NONE")
     scanTip:ClearLines()
     if not pcall(scanTip.SetSpellByID, scanTip, id) then scanTip:Hide(); return "" end
     local n = scanTip:NumLines()
     local fs = n and n > 0 and _G["HRAScanTooltipTextLeft" .. n]
-    local text = fs and fs:GetText() or ""
+    local text = fs and Str(fs:GetText()) or ""
     scanTip:Hide()
     return text
 end
 
 local function SpellDesc(id)
     local d
-    if C_Spell and C_Spell.GetSpellDescription then d = C_Spell.GetSpellDescription(id) end
-    if (not d or d == "") and GetSpellDescription then d = GetSpellDescription(id) end
+    if C_Spell and C_Spell.GetSpellDescription then d = Str(C_Spell.GetSpellDescription(id)) end
     if not d or d == "" then d = TooltipDesc(id) end
     if not d or d == "" then
-        if C_Spell and C_Spell.RequestLoadSpellData then C_Spell.RequestLoadSpellData(id) end
+        RequestSpellLoad(id)
         return ""
     end
     return Clean(d)
@@ -231,50 +248,18 @@ local function AurasRestricted()
     return false
 end
 
-local function ForEachAura(unit, filter, cb)
-    if AurasRestricted() then return end
-    if C_UnitAuras and C_UnitAuras.GetAuraDataByIndex then
-        for i = 1, 40 do
-            -- pcall: in WoW Forever reading an aura while auras are secret raises an
-            -- error instead of returning nothing, so stop quietly if that happens.
-            local ok, a = pcall(C_UnitAuras.GetAuraDataByIndex, unit, i, filter)
-            if not ok or type(a) ~= "table" then break end
-            local sid, dur, exp, src = a.spellId, a.duration, a.expirationTime, a.sourceUnit
-            if not (Secret(sid) or Secret(dur) or Secret(exp) or Secret(src)) then
-                if cb(sid, dur, exp, src) then return end
-            end
-        end
-    elseif UnitAura then
-        for i = 1, 40 do
-            local ok, name, _, _, _, dur, exp, src, _, _, sid = pcall(UnitAura, unit, i, filter)
-            if not ok or not name then break end
-            if not (Secret(sid) or Secret(dur) or Secret(exp) or Secret(src)) then
-                if cb(sid, dur, exp, src) then return end
-            end
-        end
-    end
-end
-
 local function IterSpellbook(cb)
-    if C_SpellBook and C_SpellBook.GetNumSpellBookSkillLines and Enum and Enum.SpellBookSpellBank then
-        for tab = 1, C_SpellBook.GetNumSpellBookSkillLines() do
-            local info = C_SpellBook.GetSpellBookSkillLineInfo(tab)
-            if info and not info.shouldHide then
-                for i = info.itemIndexOffset + 1, info.itemIndexOffset + info.numSpellBookItems do
-                    local it = C_SpellBook.GetSpellBookItemInfo(i, Enum.SpellBookSpellBank.Player)
-                    if it and it.spellID and not it.isPassive then cb(it.spellID, it.name, it.subName) end
-                end
-            end
-        end
-    elseif GetNumSpellTabs then
-        local book = BOOKTYPE_SPELL or "spell"
-        for tab = 1, GetNumSpellTabs() do
-            local _, _, offset, num = GetSpellTabInfo(tab)
-            for i = (offset or 0) + 1, (offset or 0) + (num or 0) do
-                local stype, id = GetSpellBookItemInfo(i, book)
-                if stype == "SPELL" and id then
-                    local name, sub = GetSpellBookItemName(i, book)
-                    cb(id, name, sub)
+    if not (C_SpellBook and C_SpellBook.GetNumSpellBookSkillLines and C_SpellBook.GetSpellBookSkillLineInfo
+            and C_SpellBook.GetSpellBookItemInfo and Enum and Enum.SpellBookSpellBank) then
+        return
+    end
+    for tab = 1, C_SpellBook.GetNumSpellBookSkillLines() do
+        local info = C_SpellBook.GetSpellBookSkillLineInfo(tab)
+        if type(info) == "table" and not info.shouldHide then
+            for i = info.itemIndexOffset + 1, info.itemIndexOffset + info.numSpellBookItems do
+                local it = C_SpellBook.GetSpellBookItemInfo(i, Enum.SpellBookSpellBank.Player)
+                if type(it) == "table" and Num(it.spellID) and not it.isPassive then
+                    cb(it.spellID, Str(it.name), Str(it.subName))
                 end
             end
         end
@@ -533,8 +518,7 @@ ns.Applicable = Applicable
 -- WoW Forever has no GetNumTalentTabs / GetTalentInfo. Its talent frame uses the
 -- modern trait system (C_ClassTalents / C_Traits): a config holds trees, trees
 -- hold nodes, and each node has a rank and an entry whose spell is the talent.
--- The old Classic functions are kept as a fallback for other clients.
--- Every talent with points becomes { name, rank, maxRank, entryID, spellID, tab, index }.
+-- Every talent with points becomes { name, rank, maxRank, entryID, spellID }.
 -- ============================================================
 local function Call(fn, ...)
     if type(fn) ~= "function" then return nil end
@@ -620,41 +604,16 @@ local function ReadTalentsTraits()
     return nil
 end
 
-local function ReadTalentsLegacy()
-    if not (GetNumTalentTabs and GetNumTalents) then return nil end
-    local list = {}
-    local okAll = pcall(function()
-        for tab = 1, (GetNumTalentTabs() or 0) do
-            for i = 1, (GetNumTalents(tab) or 0) do
-                local name, rank, maxRank
-                if GetTalentInfo then
-                    local n, _, _, _, r, m = GetTalentInfo(tab, i)
-                    name, rank, maxRank = n, r, m
-                end
-                if not name and C_SpecializationInfo and C_SpecializationInfo.GetTalentInfo then
-                    local info = Call(C_SpecializationInfo.GetTalentInfo, { specializationIndex = tab, talentIndex = i })
-                    if type(info) == "table" then name, rank, maxRank = info.name, info.rank, info.maxRank end
-                end
-                if name and type(rank) == "number" and rank > 0 then
-                    list[#list + 1] = { name = name, rank = rank, maxRank = maxRank or rank, tab = tab, index = i }
-                end
-            end
-        end
-    end)
-    if okAll then return list, "talent tabs" end
-end
-
 -- Reads talents once per refresh; the result is cached for the cast-learning code.
 function HRA:ReadTalents()
     local list, method = ReadTalentsTraits()
-    if not list or #list == 0 then
-        local l2, m2 = ReadTalentsLegacy()
-        if l2 and (#l2 > 0 or not list) then list, method = l2, m2 end
-    end
     list = list or {}
-    table.sort(list, function(a, b) return a.name < b.name end)
+    table.sort(list, function(a, b)
+        if a.name ~= b.name then return a.name < b.name end
+        return (a.nodeID or 0) < (b.nodeID or 0)
+    end)
     local parts = {}
-    for _, t in ipairs(list) do parts[#parts + 1] = t.name .. "=" .. t.rank end
+    for _, t in ipairs(list) do parts[#parts + 1] = (t.nodeID or t.name) .. "=" .. t.rank end
     self.talents, self.talentMethod = list, method or "none found"
     self.lastSig = table.concat(parts, ";")
     return list
@@ -701,20 +660,6 @@ local function TalentText(t)
             end
             scanTip:Hide()
         end
-    elseif t.tab and t.index then
-        scanTip:SetOwner(WorldFrame, "ANCHOR_NONE")
-        scanTip:ClearLines()
-        if pcall(scanTip.SetTalent, scanTip, t.tab, t.index) then
-            for idx = 2, scanTip:NumLines() do
-                local fs = _G["HRAScanTooltipTextLeft" .. idx]
-                local tx = fs and fs:GetText()
-                if type(tx) == "string" then
-                    if tx:lower():find("^next rank") then break end
-                    parts[#parts + 1] = Clean(tx)
-                end
-            end
-        end
-        scanTip:Hide()
     end
     if #parts > 0 then return table.concat(parts, ". "), true end
     -- Last resort: the talent spell's own description (may only describe rank 1)
@@ -862,47 +807,69 @@ end
 --     updated the tooltip yet, e.g. right after swapping gear), or
 --   * the tooltip went DOWN as spell healing went up, or rose impossibly fast
 --     (a temporary buff such as Power Infusion was active for one of the readings).
+-- A measured slope that can't be right: the tooltip went DOWN as healing power went
+-- up, or rose impossibly fast (e.g. a temporary buff during one of the readings).
+-- Tooltips round to whole numbers, hence the tolerance.
 local function PlausibleSlope(slope, dsp, expected)
-    local tol = 2 / dsp                       -- tooltips round to whole numbers
-    if slope < -tol then return false end
-    if expected >= 0.1 and expected * dsp > 4 and math.abs(slope) <= tol then return false end
-    if slope > math.max(1.6, expected * 2.5) then return false end
+    local tol = 2 / dsp
+    if slope < -tol then return false, "the heal went down as healing power went up" end
+    if slope > math.max(1.6, (expected or 0) * 2.5) then return false, "the heal rose impossibly fast (a buff?)" end
     return true
 end
 
-function HRA:LearnSlope(id, level, sig, sp, value, expected)
+-- Keeps each rank's tooltip value at the lowest and highest healing power seen
+-- (same level and talents) and returns the slope between them once they are 20+
+-- apart. With record = false it only reads what is stored.
+function HRA:LearnSlope(id, level, sig, sp, value, expected, record)
     CDB.samples = CDB.samples or {}
-    expected = expected or 0
     local s = CDB.samples[id]
     if not s or s.lvl ~= level or s.sig ~= sig then
-        CDB.samples[id] = { lvl = level, sig = sig, lo = { sp, value }, hi = { sp, value } }
-        return nil
-    end
-    -- Only accept a new low/high reading if it agrees with the reading at the other end
-    local function ok(other)
-        local dsp = sp - other[1]
-        if math.abs(dsp) < 20 then return true end
-        return PlausibleSlope((value - other[2]) / dsp, math.abs(dsp), expected)
-    end
-    if sp < s.lo[1] then
-        if ok(s.hi) then s.lo = { sp, value } end
-    elseif sp == s.lo[1] and ok(s.hi) then
-        s.lo[2] = value
-    end
-    if sp > s.hi[1] then
-        if ok(s.lo) then s.hi = { sp, value } end
-    elseif sp == s.hi[1] and ok(s.lo) then
-        s.hi[2] = value
+        if not record then return nil end
+        s = { lvl = level, sig = sig, lo = { sp, value }, hi = { sp, value } }
+        CDB.samples[id] = s
+    elseif record then
+        local function ok(other)
+            local dsp = sp - other[1]
+            if math.abs(dsp) < 20 then return true end
+            local good, why = PlausibleSlope((value - other[2]) / dsp, math.abs(dsp), expected)
+            if not good then s.note = why end
+            return good
+        end
+        if sp < s.lo[1] then
+            if ok(s.hi) then s.lo = { sp, value } end
+        elseif sp == s.lo[1] and ok(s.hi) then
+            s.lo[2] = value
+        end
+        if sp > s.hi[1] then
+            if ok(s.lo) then s.hi = { sp, value } end
+        elseif sp == s.hi[1] and ok(s.lo) then
+            s.hi[2] = value
+        end
     end
     local dsp = s.hi[1] - s.lo[1]
     if dsp < 20 then return nil end
     local slope = (s.hi[2] - s.lo[2]) / dsp
-    if not PlausibleSlope(slope, dsp, expected) then
+    local good, why = PlausibleSlope(slope, dsp, expected)
+    if not good then
         -- The stored readings disagree with each other: start over from this one
-        CDB.samples[id] = { lvl = level, sig = sig, lo = { sp, value }, hi = { sp, value } }
+        CDB.samples[id] = { lvl = level, sig = sig, lo = { sp, value }, hi = { sp, value }, note = why }
         return nil
     end
     return math.max(slope, 0), s.lo[1], s.hi[1]
+end
+
+-- Why a rank has no measurement yet (for its row tooltip).
+function HRA:SampleStatus(id)
+    local s = CDB.samples and CDB.samples[id]
+    if not s then return "no readings yet" end
+    local txt
+    if s.hi[1] - s.lo[1] < 20 then
+        txt = ("read at %d healing power so far; change it by 20+ and Refresh"):format(s.lo[1])
+    else
+        txt = ("read at %d and %d healing power"):format(s.lo[1], s.hi[1])
+    end
+    if s.note then txt = txt .. " (last reading ignored: " .. s.note .. ")" end
+    return txt
 end
 
 function HRA:ComputeEntry(e, mods, sig, bonus, critPct, playerLevel)
@@ -1016,7 +983,9 @@ function HRA:ComputeEntry(e, mods, sig, bonus, critPct, playerLevel)
     local formulaShare = ns.DownrankShare(playerLevel, e.level)
     local share = formulaShare
     local expectedPerSP = (cd + ch) * formulaShare * M
-    local slope, sLo, sHi = self:LearnSlope(e.id, playerLevel, sig, bonus, direct + hot, expectedPerSP)
+    row.rawValue = direct + hot
+    local slope, sLo, sHi = self:LearnSlope(e.id, playerLevel, sig, bonus, direct + hot, expectedPerSP,
+        self.ctx and self.ctx.record)
 
     -- Is the talent healing % already in the tooltip? Assumed yes (verified in game for
     -- Improved Renew). Confirmed per spell once a rank that keeps its full +healing has
@@ -1159,10 +1128,39 @@ function HRA:ComputeRows()
     local critTalent = (mods.crit["*"] and mods.crit["*"].amount or 0)
         + (schoolKey and mods.crit[schoolKey] and mods.crit[schoolKey].amount or 0)
 
-    local rows = {}
-    for _, e in ipairs(entries) do
-        local show = e.known or (DB.untrained and e.level > 0 and e.level <= level)
-        if show then rows[#rows + 1] = self:ComputeEntry(e, mods, sig, bonus, critPct, level) end
+    local function computeAll()
+        local rows = {}
+        for _, e in ipairs(entries) do
+            local show = e.known or (DB.untrained and e.level > 0 and e.level <= level)
+            if show then rows[#rows + 1] = self:ComputeEntry(e, mods, sig, bonus, critPct, level) end
+        end
+        return rows
+    end
+
+    -- Pass 1: read tooltips without recording a measurement.
+    self.ctx.record = false
+    local rows = computeAll()
+
+    -- Right after a gear swap the game updates spell tooltips a moment later than
+    -- the healing power number. If healing power changed since the last Refresh but
+    -- not a single tooltip did, the tooltips are stale: don't record this reading.
+    local values = {}
+    for _, r in ipairs(rows) do if r.rawValue then values[r.id] = r.rawValue end end
+    local prev, stale = self.lastSnapshot, false
+    if prev and math.abs(bonus - prev.sp) >= 1 then
+        stale = true
+        for id, v in pairs(values) do
+            if prev.values[id] and math.abs(prev.values[id] - v) > 0.01 then stale = false; break end
+        end
+    end
+    self.lastSnapshot = { sp = bonus, values = values }
+    self.tooltipsStale = stale
+
+    -- Pass 2: record the reading and recompute with any new measurements.
+    if not stale then
+        self.ctx.record = true
+        rows = computeAll()
+        self.ctx.record = false
     end
     self.lastMods = mods
     return rows, { level = level, class = class, bonus = bonus, crit = critPct, critTalent = critTalent, school = school }
@@ -1298,7 +1296,7 @@ local function RowOnEnter(self)
         if measured then
             GT:AddLine(("  measured from your tooltips at %d and %d healing power"):format(r.slopeLo, r.slopeHi), 0.6, 0.6, 0.6)
         else
-            GT:AddLine("  change your healing power by 20+ (swap gear, Refresh) to measure it", 0.6, 0.6, 0.6, true)
+            GT:AddLine("  " .. HRA:SampleStatus(r.id), 0.6, 0.6, 0.6, true)
         end
         if r.tf and r.tf > 1 then
             GT:AddLine("  coefficient and base heal are per target", 0.6, 0.6, 0.6)
@@ -1559,7 +1557,7 @@ local function MakeFrame()
         fs:SetPoint("LEFT", cb, "RIGHT", 1, 1)
         fs:SetText(label)
         fs:SetTextColor(C.text[1], C.text[2], C.text[3])
-        cb:SetScript("OnClick", function(self) DB[key] = self:GetChecked() and true or false; Safe(HRA.Refresh, HRA) end)
+        cb:SetScript("OnClick", function(self) Safe(HRA.SetOption, HRA, key, self:GetChecked() and true or false) end)
         cb:SetScript("OnEnter", function(self)
             GameTooltip:SetOwner(self, "ANCHOR_TOP")
             GameTooltip:AddLine(label, 1, 0.82, 0)
@@ -1821,6 +1819,10 @@ function HRA:Render()
         FmtInt(info.bonus),
         ns.SCHOOL_NAME[info.school] or "Spell", critText, self.updatedAt or "-"))
 
+    if self.tooltipsStale then
+        f.info:SetText((f.info:GetText() or "") .. "   |cffffd100Tooltips haven't caught up with your gear yet - click Refresh again|r")
+    end
+
     f:Show()
     self.hasPending = pending
 end
@@ -1829,15 +1831,15 @@ end
 -- or opening the table for the first time.
 function HRA:Refresh(isRetry)
     if not isRetry then retries = 0 end
+    wipe(self.pendingLoads)
     self:Recalculate()
     self:Render()
-    -- Spell descriptions can arrive a moment after the first request: retry a few
-    -- times right after a refresh you asked for, then stop.
-    if self.hasPending and retries < 3 then
-        retries = retries + 1
-        C_Timer.After(1, function()
-            Safe(function() if MainFrame and MainFrame:IsShown() then HRA:Refresh(true) end end)
-        end)
+    -- Spell data that wasn't cached yet has been requested: recalculate once it
+    -- arrives (SPELL_DATA_LOAD_RESULT), at most 3 times per Refresh you asked for.
+    if next(self.pendingLoads) and retries < 3 then
+        self:WatchSpellLoads(true)
+    else
+        self:WatchSpellLoads(false)
     end
 end
 
@@ -1853,39 +1855,36 @@ end
 
 -- ============================================================
 -- HoT DURATION LEARNING
--- After you cast a HoT, read the real duration off the aura you applied.
+-- After you cast a HoT (out of combat, window open), the UNIT_AURA event that
+-- adds or refreshes your aura carries its real duration. No polling.
 -- ============================================================
-local function ObserveHot(spellID, castAt)
-    if AurasRestricted() then return end   -- in combat: auras are hidden, try next cast
-    local units = { "target", "player", "focus", "mouseover", "party1", "party2", "party3", "party4" }
-    local inRaid = IsInRaid and IsInRaid()
-    if inRaid and not Secret(inRaid) then for i = 1, 40 do units[#units + 1] = "raid" .. i end end
-    for _, u in ipairs(units) do
-        local exists = UnitExists(u)
-        if exists and not Secret(exists) then
-            local found
-            ForEachAura(u, "HELPFUL", function(sid, dur, exp, src)
-                if sid == spellID and dur and dur > 0 and exp and (src == "player" or src == nil)
-                   and math.abs((exp - dur) - castAt) < 1.5 then
-                    found = dur
-                    return true
-                end
-            end)
-            if found then
-                local rounded = math.floor(found * 10 + 0.5) / 10
-                local prev = CDB.observed[spellID]
-                CDB.observed[spellID] = { dur = rounded, sig = TalentSig() }
-                if not prev or prev.dur ~= rounded then
-                    local sub = SpellSubtext(spellID)
-                    print(("|cff00ff96HealRankAdvisor:|r %s%s lasts |cffffff00%ss|r (click Refresh to update the table)"):format(
-                        SpellName(spellID) or "?", (sub and sub ~= "") and (" (" .. sub .. ")") or "", FmtSec(rounded)))
-                end
-                return
-            end
-        end
+local hotPending     -- { id = spellID, t = cast time }
+
+local function RecordHotDuration(spellID, dur)
+    local rounded = math.floor(dur * 10 + 0.5) / 10
+    local prev = CDB.observed[spellID]
+    CDB.observed[spellID] = { dur = rounded, sig = TalentSig() }
+    if not prev or prev.dur ~= rounded then
+        local sub = SpellSubtext(spellID)
+        print(("|cff00ff96HealRankAdvisor:|r %s%s lasts |cffffff00%ss|r (click Refresh to update the table)"):format(
+            SpellName(spellID) or "?", (sub and sub ~= "") and (" (" .. sub .. ")") or "", FmtSec(rounded)))
     end
 end
 
+-- True if this aura is the HoT we just cast; records its duration.
+local function CheckAura(a)
+    if type(a) ~= "table" or not hotPending then return false end
+    local sid, dur, exp = Num(a.spellId), Num(a.duration), Num(a.expirationTime)
+    if not sid or sid ~= hotPending.id or not dur or dur <= 0 or not exp then return false end
+    local mine = a.isFromPlayerOrPlayerPet
+    if Secret(mine) then return false end
+    if not (mine == true or Str(a.sourceUnit) == "player") then return false end
+    if math.abs((exp - dur) - hotPending.t) > 1.5 then return false end
+    RecordHotDuration(sid, dur)
+    return true
+end
+
+-- ============================================================
 -- ============================================================
 -- MINIMAP BUTTON (LibDataBroker + LibDBIcon)
 -- Left-click opens/closes the table, right-click opens it and recalculates.
@@ -1951,18 +1950,97 @@ function HealRankAdvisor_OnAddonCompartmentLeave()
     GameTooltip:Hide()
 end
 
+function HRA:ApplyMinimapVisibility()
+    if not self.ldbIcon then return end
+    if DB.minimap.hide then self.ldbIcon:Hide(addonName) else self.ldbIcon:Show(addonName) end
+end
+
 function HRA:ToggleMinimapButton()
     if not self.ldbIcon then
         print("|cff00ff96HealRankAdvisor:|r the minimap button library isn't loaded.")
         return
     end
-    DB.minimap.hide = not DB.minimap.hide
+    self:SetOption("minimapHide", not DB.minimap.hide)
     if DB.minimap.hide then
-        self.ldbIcon:Hide(addonName)
         print("|cff00ff96HealRankAdvisor:|r minimap button hidden. Type /hra minimap to show it again.")
     else
-        self.ldbIcon:Show(addonName)
         print("|cff00ff96HealRankAdvisor:|r minimap button shown.")
+    end
+end
+
+-- ============================================================
+-- OPTIONS (Settings API: Esc > Options > AddOns > Heal Rank Advisor)
+-- The same options are also tick boxes at the bottom of the table window; both
+-- read and write the account-wide saved table, so they always agree.
+-- ============================================================
+local OPTION_LIST = {
+    { key = "crit",          name = "Count crits" },
+    { key = "group",         name = "Group heals hit every target" },
+    { key = "untrained",     name = "Show untrained ranks" },
+    { key = "hotByDuration", name = "HoT HPS by duration" },
+}
+
+-- Applies an option change from the table window, the Settings panel or a slash command.
+function HRA:SetOption(key, value)
+    local setting = self.settings and self.settings[key]
+    if setting and setting.SetValue then
+        setting:SetValue(value)            -- writes the saved table and calls OnOptionChanged
+        return
+    end
+    if key == "minimapHide" then DB.minimap.hide = value else DB[key] = value end
+    self:OnOptionChanged(key)
+end
+
+function HRA:OnOptionChanged(key)
+    if key == "minimapHide" then
+        self:ApplyMinimapVisibility()
+    elseif MainFrame and MainFrame:IsShown() then
+        self:Refresh()
+    end
+end
+
+function HRA:SetupSettings()
+    if self.settingsCategory then return end
+    -- Capability probe: Mainline's Settings API (11.0.2+ signatures).
+    if not (Settings and Settings.RegisterVerticalLayoutCategory and Settings.RegisterAddOnSetting
+            and Settings.CreateCheckbox and Settings.RegisterAddOnCategory) then
+        self.settingsUnavailable = "the Settings API isn't available on this client"
+        return
+    end
+    local boolType = (Settings.VarType and Settings.VarType.Boolean) or "boolean"
+    local ok, err = pcall(function()
+        local category = Settings.RegisterVerticalLayoutCategory("Heal Rank Advisor")
+        local settings = {}
+        local function add(key, tbl, tblKey, name, tip, default)
+            local setting = Settings.RegisterAddOnSetting(category, "HealRankAdvisor_" .. key, tblKey, tbl,
+                boolType, name, default)
+            if setting.SetValueChangedCallback then
+                setting:SetValueChangedCallback(function() Safe(HRA.OnOptionChanged, HRA, key) end)
+            end
+            Settings.CreateCheckbox(category, setting, tip)
+            settings[key] = setting
+        end
+        for _, o in ipairs(OPTION_LIST) do
+            add(o.key, DB, o.key, o.name, OPTION_TIPS[o.key], DEFAULTS[o.key])
+        end
+        add("minimapHide", DB.minimap, "hide", "Hide minimap button",
+            "Hide the Lightwell button on the minimap. The table is still available from the addon list button next to the minimap and with /hra.", false)
+        Settings.RegisterAddOnCategory(category)
+        self.settings, self.settingsCategory = settings, category
+    end)
+    if not ok then
+        self.settings, self.settingsCategory = nil, nil
+        self.settingsUnavailable = tostring(err)
+    end
+end
+
+function HRA:OpenSettings()
+    if self.settingsCategory and Settings and Settings.OpenToCategory then
+        local id = self.settingsCategory.GetID and self.settingsCategory:GetID() or self.settingsCategory
+        Settings.OpenToCategory(id)
+    else
+        print(("|cff00ff96HealRankAdvisor:|r the options panel isn't available (%s). Use the tick boxes at the bottom of the table instead.")
+            :format(self.settingsUnavailable or "unknown reason"))
     end
 end
 
@@ -1975,6 +2053,7 @@ local function PrintHelp()
     print(("|cff00ff96HealRankAdvisor %s|r commands:"):format(VERSION))
     print("  /hra            Open or close the table")
     print("  /hra refresh    Recalculate the table")
+    print("  /hra options    Open the options in the game's AddOns settings")
     print("  /hra talents    List your talents and the effects found on your heals")
     print("  /hra minimap    Show or hide the minimap button")
     print("  /hra resetobs   Forget learned HoT durations and coefficient measurements")
@@ -2016,11 +2095,12 @@ local function SlashHandler(msg)
         if not ok then print("error: " .. tostring(rows)) return end
         for _, r in ipairs(rows) do
             local p = r.parsed or {}
-            print(("[%d] %s r%s lvl%s | castNow=%s ttDur=%s effDur=%s(%s) | min=%s max=%s hot=%s tick=%s/%s | tf=%s mana=%s coef=%s base=%s | HPS=%s HPM=%s"):format(
+            print(("[%d] %s r%s lvl%s | castNow=%s ttDur=%s effDur=%s(%s) | min=%s max=%s hot=%s tick=%s/%s | tf=%s mana=%s coef=%s base=%s [%s] | HPS=%s HPM=%s"):format(
                 r.id, r.name, tostring(r.rank), tostring(r.level), tostring(r.castNow), tostring(r.ttDur),
                 tostring(r.effDur), tostring(r.durSrc), tostring(p.min), tostring(p.max), tostring(p.hotTotal),
                 tostring(p.tick), tostring(p.interval), tostring(r.tf), tostring(r.mana),
                 r.coef and ("%.3f"):format(r.coef) or "-", r.baseHeal and tostring(math.floor(r.baseHeal + 0.5)) or "-",
+                r.shareMeasured and "measured" or HRA:SampleStatus(r.id),
                 r.hps and ("%.1f"):format(r.hps) or "-", r.hpm and ("%.2f"):format(r.hpm) or "-"))
         end
         return
@@ -2036,6 +2116,9 @@ local function SlashHandler(msg)
         return
     elseif msg == "refresh" then
         HRA:Refresh()
+        return
+    elseif msg == "options" or msg == "config" or msg == "settings" then
+        HRA:OpenSettings()
         return
     elseif msg ~= "" then
         print(("|cff00ff96HealRankAdvisor:|r unknown command \"%s\"."):format(msg))
@@ -2064,7 +2147,15 @@ function HRA:SetLearning(on)
         Reg("UNIT_SPELLCAST_SUCCEEDED", "player")
     else
         ev:UnregisterEvent("UNIT_SPELLCAST_SUCCEEDED")
+        ev:UnregisterEvent("UNIT_AURA")
+        hotPending = nil
+        self:WatchSpellLoads(false)
     end
+end
+
+-- SPELL_DATA_LOAD_RESULT is only listened to while a Refresh is waiting for data.
+function HRA:WatchSpellLoads(on)
+    if on then Reg("SPELL_DATA_LOAD_RESULT") else ev:UnregisterEvent("SPELL_DATA_LOAD_RESULT") end
 end
 
 function handlers.ADDON_LOADED(loadedName)
@@ -2091,11 +2182,13 @@ function handlers.ADDON_LOADED(loadedName)
 
     -- Measurements stored by versions before 1.2.4 weren't checked for stale
     -- tooltips and could be wrong: start them over once.
-    if (CDB.dataVersion or 0) < 2 then
+    -- 1.5.1 changed how readings are checked and how the talent signature is built.
+    if (CDB.dataVersion or 0) < 3 then
         CDB.samples, CDB.healMode = {}, {}
-        CDB.dataVersion = 2
+        CDB.dataVersion = 3
     end
     Safe(HRA.SetupMinimapButton, HRA)
+    Safe(HRA.SetupSettings, HRA)
 end
 
 function handlers.PLAYER_LOGIN()
@@ -2104,11 +2197,43 @@ function handlers.PLAYER_LOGIN()
 end
 
 function handlers.UNIT_SPELLCAST_SUCCEEDED(unit, _, spellID)
-    if unit ~= "player" or type(spellID) ~= "number" or Secret(spellID) then return end
+    if unit ~= "player" or not Num(spellID) then return end
     -- HoT durations are only learned out of combat (auras are hidden in combat)
     if ns.HOT_IDS[spellID] and not AurasRestricted() then
-        local castAt = GetTime()
-        C_Timer.After(0.3, function() Safe(ObserveHot, spellID, castAt) end)
+        hotPending = { id = spellID, t = GetTime() }
+        Reg("UNIT_AURA")
+    end
+end
+
+function handlers.UNIT_AURA(unit, info)
+    local done = not hotPending or (GetTime() - hotPending.t > 3) or AurasRestricted()
+    if not done and Str(unit) and type(info) == "table" then
+        for _, a in ipairs(type(info.addedAuras) == "table" and info.addedAuras or {}) do
+            if CheckAura(a) then done = true break end
+        end
+        if not done and type(info.updatedAuraInstanceIDs) == "table"
+           and C_UnitAuras and C_UnitAuras.GetAuraDataByAuraInstanceID then
+            for _, iid in ipairs(info.updatedAuraInstanceIDs) do
+                -- pcall: reading an aura while auras are secret raises an error on Forever
+                local ok, a = pcall(C_UnitAuras.GetAuraDataByAuraInstanceID, unit, iid)
+                if ok and CheckAura(a) then done = true break end
+            end
+        end
+    end
+    if done then
+        hotPending = nil
+        ev:UnregisterEvent("UNIT_AURA")
+    end
+end
+
+function handlers.SPELL_DATA_LOAD_RESULT(spellID)
+    if not Num(spellID) or not HRA.pendingLoads[spellID] then return end
+    HRA.pendingLoads[spellID] = nil
+    if next(HRA.pendingLoads) then return end
+    HRA:WatchSpellLoads(false)
+    if MainFrame and MainFrame:IsShown() then
+        retries = retries + 1
+        HRA:Refresh(true)
     end
 end
 
